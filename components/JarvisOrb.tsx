@@ -2,10 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createOrbScene, type OrbSceneApi } from "@/lib/orbScene";
-import { HandTracker, type TrackerStatus } from "@/lib/handTracker";
+import { HandTracker, type TrackerStatus, type SwipeDirection } from "@/lib/handTracker";
 import { VoiceAssistant, type VoiceState, type VoiceAssistantHandle } from "@/components/VoiceAssistant";
+import { InfoDashboard } from "@/components/InfoDashboard";
 
 type CameraState = "off" | "starting" | "on" | "error";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 const MODE_LABEL: Record<TrackerStatus["mode"], string> = {
   idle: "STANDBY",
@@ -26,6 +29,22 @@ export default function JarvisOrb() {
   const [error, setError] = useState<string | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
 
+  const handleSwipe = useCallback((direction: SwipeDirection) => {
+    const action =
+      direction === "down"
+        ? { type: "minimize_all", arg: "" }
+        : { type: "switch_tab", arg: direction === "right" ? "next" : "previous" };
+
+    fetch(`${BACKEND_URL}/gesture_action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action),
+    }).catch(() => {
+      // Silent — a failed gesture action isn't worth interrupting the flow for;
+      // the same action is always available by voice as a fallback.
+    });
+  }, []);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -37,6 +56,18 @@ export default function JarvisOrb() {
       scene.dispose();
       sceneRef.current = null;
     };
+  }, []);
+
+  // Greet automatically shortly after the page loads — e.g. when you open
+  // your laptop and this is your startup page. Only fires once per load.
+  // Note: if your browser blocks audio until you've interacted with the
+  // page at least once, the first greeting may be silent — subsequent ones
+  // (double-pinch, or a page reload after any click) will work normally.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      voiceRef.current?.greet();
+    }, 1500);
+    return () => clearTimeout(timer);
   }, []);
 
   const stopGestures = useCallback(() => {
@@ -57,6 +88,8 @@ export default function JarvisOrb() {
     const tracker = new HandTracker(video, overlay, {
       onRotate: (dt, dp) => sceneRef.current?.rotateBy(dt, dp),
       onZoom: (factor) => sceneRef.current?.zoomBy(factor),
+      onDoubleTap: () => voiceRef.current?.greet(),
+      onSwipe: handleSwipe,
       onStatus: setStatus,
     });
     trackerRef.current = tracker;
@@ -128,6 +161,8 @@ export default function JarvisOrb() {
         <div className="hud-subtitle">VOICE-CONTROLLED PC ASSISTANT</div>
       </div>
 
+      <InfoDashboard />
+
       <div className="hud hud-hint">
         <div>
           <span className="key">DRAG</span> spin&nbsp;&nbsp;
@@ -136,7 +171,10 @@ export default function JarvisOrb() {
         {cameraOn ? (
           <div>
             <span className="key">PINCH + MOVE</span> spin&nbsp;&nbsp;
-            <span className="key">PINCH BOTH HANDS ± SPREAD</span> zoom
+            <span className="key">PINCH BOTH HANDS ± SPREAD</span> zoom&nbsp;&nbsp;
+            <span className="key">PINCH TWICE</span> greet&nbsp;&nbsp;
+            <span className="key">OPEN HAND SWIPE ←/→</span> switch tab&nbsp;&nbsp;
+            <span className="key">OPEN HAND SWIPE ↓</span> minimize all
           </div>
         ) : (
           <div>

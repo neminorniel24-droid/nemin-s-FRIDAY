@@ -35,8 +35,10 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env:
 #   GROQ_API_KEY            — required, from console.groq.com
-#   NEWSAPI_KEY             — optional, only needed for "send me the news" —
-#                             free key from newsapi.org/register
+#   NEWSDATA_KEY            — recommended, from newsdata.io/register
+#                             (used for both the dashboard's local news and
+#                              WhatsApp news — falls back to NEWSAPI_KEY if unset)
+#   NEWSAPI_KEY             — optional fallback, from newsapi.org
 #   WHATSAPP_DEFAULT_NUMBER — optional, e.g. +91XXXXXXXXXX, used when you
 #                             say "text me the news" without naming a number
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -88,6 +90,207 @@ about the new action so the LLM knows it exists. Keep every action as a
 specific function with validated/sanitized args — don't add a generic
 "run this shell command" action; that's the difference between a PC
 assistant and an open remote-execution hole.
+
+## What's new in v5
+
+- **Weather + local news dashboard** (top-right panel): on load, the
+  browser asks for location permission. If granted, it shows current
+  weather (via Open-Meteo, no key needed), your city (via BigDataCloud's
+  free reverse-geocode, no key needed), and a few local headlines (via the
+  backend's `/local_news` endpoint, which needs `NEWSDATA_KEY` or
+  `NEWSAPI_KEY`). If permission is denied, there's a Retry button — it
+  won't keep re-prompting on its own.
+- **Open almost anything installed** — `open_app`/`close_app` no longer
+  need an exact whitelist match. If the name isn't one of the fast-path
+  entries, it searches everything Windows has a Start Menu shortcut for
+  (`Get-StartApps`) and launches the closest match — covers Steam, PUBG,
+  Discord, OBS, basically anything installed. `close_app` similarly falls
+  back to a fuzzy `Get-Process` match. Both are still constrained to
+  things that already exist on your machine — this generalizes *which*
+  app gets opened/closed, not *what code runs*.
+- **Double-pinch greeting** — pinch and release twice quickly with one
+  hand (within ~0.7s) while gestures are on, and Nemiii greets you by name
+  and starts listening automatically, no button press needed.
+
+### A couple of honest caveats
+
+- The fuzzy `close_app` match will stop *every* process whose name
+  contains your search text — a vague term like "game" could catch more
+  than you meant. Use specific names.
+- Weather/geolocation/reverse-geocoding calls go straight from your
+  browser to Open-Meteo/BigDataCloud (both free, keyless, no setup) —
+  only the news portion depends on your backend keys.
+
+## What's new in v6
+
+- **Media key fix (for real this time)** — the earlier fix used
+  `.NET`'s `SendKeys`, which doesn't reliably handle media-transport keys
+  even with the char-code trick. Now using `WScript.Shell`'s `SendKeys`
+  (a different, COM-based implementation) — this is the specifically
+  documented approach that actually works for this key range.
+- **Auto-greet on load** — Nemiii now greets you ~1.5s after the page
+  finishes loading, no gesture or button needed. (If your browser blocks
+  audio before any interaction on the page, the very first greeting after
+  a fresh browser launch might be silent — reload once you've clicked
+  anywhere on the page and it'll work normally after that.)
+- **Auto-launch on boot** — `scripts/start-nemiii.sh` (runs in WSL, starts
+  both backend and frontend, waits for them to be healthy, opens your
+  browser) and `scripts/start-nemiii.bat` (Windows-side trigger). See
+  setup steps below.
+
+### Setting up auto-launch
+
+One-time build (production start is faster/more stable for autostart than
+the dev server):
+```bash
+cd ~/friday/nemin-ai-assist
+npm run build
+```
+
+Test the script manually first:
+```bash
+bash ~/friday/nemin-ai-assist/scripts/start-nemiii.sh
+```
+Check `~/friday/nemin-ai-assist/logs/backend.log` and `frontend.log` if
+anything doesn't come up.
+
+To run it automatically at login:
+1. `Win+R` → `shell:startup` → Enter
+2. Create a shortcut in that folder pointing at
+   `scripts/start-nemiii.bat` (via its `\\wsl$\...` path, or copy the
+   `.bat` to somewhere on the Windows side)
+
+If Startup-folder timing is unreliable (WSL not ready right at login),
+use Task Scheduler instead: trigger "At log on", add a 20-30 second delay,
+same command.
+
+## What's new in v8
+
+- **"Play X on YouTube"** — actually plays the top result now, not just a
+  search page. Needs a free `YOUTUBE_API_KEY` (YouTube Data API v3 — enable
+  it in Google Cloud Console, console.cloud.google.com, then create an API
+  key under Credentials; free tier covers ~100 searches/day). Without a
+  key it still works, just opens the search results page instead of
+  jumping straight to a video.
+
+## What's new in v9
+
+- **Conversation memory** — Nemiii now remembers the last ~10 exchanges
+  within a session, so follow-ups like "open that again" or "no, the other
+  one" actually have context. It's a single global in-memory list (this is
+  a single-user local app, so no session IDs needed) — restarting the
+  backend clears it. There's also a "Clear memory" button in the voice
+  panel if you want a fresh start without restarting anything.
+- **`open_and_type`** — fixes the case where typing needs to go into an app
+  that isn't already open/focused. `type_text` alone only reaches whatever
+  currently has focus; this opens the target app first, waits ~1.2s for it
+  to load, then types. Say something like "open notepad and type hello" —
+  the LLM routes that to this instead of a bare `type_text` with nothing to
+  receive it.
+- **Desktop shortcut with a real orb icon** — `scripts/generate_icon.py`
+  rendered `assets/nemiii.ico` (a small glowing peacock-teal orb, matching
+  the app's own visuals), and `scripts/create-desktop-shortcut.ps1` sets up
+  a "Nemiii" shortcut on your Desktop using it.
+
+### Setting up the desktop shortcut
+
+Prerequisite: you already ran `npm run build` for the autostart script
+(from the v6 setup). If not, do that first.
+
+From WSL:
+```bash
+powershell.exe -ExecutionPolicy Bypass -File "$(wslpath -w ~/friday/nemin-ai-assist/scripts/create-desktop-shortcut.ps1)"
+```
+
+You should see `Shortcut created: C:\Users\<you>\Desktop\Nemiii.lnk`, and
+a "Nemiii" icon (small glowing orb) on your Desktop. Double-click it —
+same as `start-nemiii.bat`, but with a proper icon and name instead of a
+generic `.bat` file.
+
+## What's new in v10
+
+### Two real bugs fixed
+- **`open_folder` silently failed on everything** — the path was wrapped
+  entirely in PowerShell single quotes, and single-quoted strings don't
+  expand variables. So `$env:USERPROFILE\Downloads` was sent as a literal
+  string containing the text `$env:USERPROFILE`, not your actual home
+  folder — which obviously doesn't exist, so it always failed.
+- **Voice always sounded confident even when actions failed** — the
+  spoken reply came from the LLM's own pre-written guess, generated
+  *before* the action ran, and the frontend spoke it unconditionally
+  without checking whether the action actually succeeded. Now the backend
+  checks the real result and corrects the reply on failure — you should
+  actually hear when something didn't work.
+
+### New: hand-gesture PC control
+With gestures on (`G`), an **open hand** (not pinching) that swipes:
+- **left/right** → switches tabs (`Ctrl+Tab` / `Ctrl+Shift+Tab`) in
+  whatever app has focus
+- **down** → minimizes all windows (show desktop)
+
+These go through a new direct `/gesture_action` endpoint that skips the
+LLM entirely — a gesture should feel instant, not wait on a model call.
+
+### New voice/PC actions
+- **Copy / paste** — "copy this" / "paste it" (sends `Ctrl+C`/`Ctrl+V` to
+  whatever's focused — same real limitation as manual copy/paste: it
+  copies what's currently *selected*, it can't magically grab arbitrary
+  content)
+- **Minimize everything**, **switch tabs** — same actions as the gestures
+  above, available by voice too
+
+### On "full control over everything"
+Still holding the same line as before, and I want to say why one more
+time since it came up again: I'll keep adding real, specific, testable
+capabilities — this round alone added 5 new ones — but not a mode where
+the LLM invents and runs arbitrary commands unchecked. That's not
+foot-dragging; it's the difference between a growing feature set and a
+single misheard sentence being able to do something irreversible with no
+review step. If a specific task is still missing, name it and I'll build
+it as a real action, same as every round so far.
+
+## What's new in v11
+
+### Spoken-only info actions (no browser/app opens for these)
+- **"Tell me the news"** — speaks headlines directly, doesn't open
+  WhatsApp or anything else. (The WhatsApp news action from before still
+  exists separately, for when you actually want it sent somewhere.)
+- **"What is [anything]"** — Wikipedia lookup, spoken summary. Free API,
+  no key needed.
+- **"Convert 100 dollars to rupees"** — currency conversion via
+  open.er-api.com, free, no key. Say it as "\<amount\> \<CODE\> to \<CODE\>"
+  for reliable parsing (e.g. "100 USD to INR").
+- **"Check my GitHub"** — speaks your most recently updated repo names.
+  Needs `GITHUB_USERNAME` in `.env` (works keyless; add `GITHUB_TOKEN`
+  — a personal access token — only if you want a higher rate limit).
+- **"What's the status of \<project\>"** — speaks git status + last
+  commit for a project. See PROJECT_PATHS setup below.
+
+### New PC actions
+- **"Open \<project\> in VS Code"** — opens a configured project folder.
+  Runs directly in WSL via the `code` CLI (VS Code's WSL-remote shell
+  command), not through PowerShell — this is dev tooling, it belongs on
+  the WSL side.
+- **"Open my \<repo\> repo"** — opens it on github.com in the browser.
+
+### Setting up projects and GitHub
+
+Add to `.env`:
+```
+GITHUB_USERNAME=your_github_username
+GITHUB_TOKEN=                          # optional, only for higher rate limits
+PROJECT_PATHS=name1=/wsl/path/one,name2=/wsl/path/two
+```
+Example matching your actual projects:
+```
+PROJECT_PATHS=inr-radar=/home/nemin/inr-radar,honeypot=/home/nemin/honeypot-project,nemiii=/home/nemin/friday/nemin-ai-assist
+```
+Use whatever names feel natural to say — those are exactly what you'll
+speak to reference them ("open inr-radar", "status of nemiii").
+
+`open_project` needs the VS Code WSL extension installed (gives you the
+`code` command inside WSL) — if you can already type `code .` in a WSL
+terminal and have VS Code open, you're set.
 
 ## Known v1 limitations / natural next steps
 

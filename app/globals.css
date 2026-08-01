@@ -245,6 +245,105 @@ body {
   border-color: rgba(125, 255, 240, 0.9);
 }
 
+/* ——— Weather + local news dashboard ——— */
+.hud-dashboard {
+  top: 24px;
+  right: 24px;
+  width: 220px;
+  padding: 12px 14px;
+  background: rgba(3, 18, 16, 0.55);
+  border: 1px solid rgba(20, 224, 192, 0.45);
+  border-radius: 4px;
+  backdrop-filter: blur(2px);
+  box-shadow: 0 0 16px rgba(10, 150, 130, 0.15);
+}
+
+.dashboard-header {
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  opacity: 0.6;
+  margin-bottom: 8px;
+  text-shadow: 0 0 8px rgba(20, 224, 192, 0.6);
+}
+
+.dashboard-note {
+  font-size: 11px;
+  opacity: 0.7;
+  line-height: 1.5;
+}
+
+.dashboard-retry {
+  background: none;
+  border: 1px solid rgba(20, 224, 192, 0.5);
+  color: #14e0c0;
+  font-family: "Courier New", monospace;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.dashboard-place {
+  font-size: 12px;
+  color: #7dfff0;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.dashboard-weather {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.dashboard-weather-emoji {
+  font-size: 18px;
+}
+
+.dashboard-weather-desc {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.dashboard-news {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dashboard-news li {
+  font-size: 10.5px;
+  line-height: 1.4;
+  opacity: 0.85;
+}
+
+.dashboard-news-source {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.memory-clear-btn {
+  width: 100%;
+  height: 26px;
+  background: none;
+  border: 1px solid rgba(20, 224, 192, 0.3);
+  color: rgba(125, 255, 240, 0.7);
+  font-family: "Courier New", monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.memory-clear-btn:hover {
+  border-color: rgba(20, 224, 192, 0.7);
+  color: #7dfff0;
+}
+
 /* ——— Camera preview panel ——— */
 .camera-panel {
   position: relative;

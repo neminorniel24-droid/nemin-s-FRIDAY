@@ -19,12 +19,21 @@ const MIDDLE_MCP = 9;
 const PINCH_ON = 0.32;
 const PINCH_OFF = 0.45;
 
+// Two pinch-onsets on the same hand within this window count as a "double tap"
+const DOUBLE_TAP_WINDOW_MS = 700;
+
+// Open-hand (non-pinching) swipe detection — for tab-switching / minimize
+const SWIPE_WINDOW_MS = 350; // how far back we look for displacement
+const SWIPE_THRESHOLD = 0.22; // normalized-coordinate displacement to count as a swipe
+const SWIPE_COOLDOWN_MS = 900; // minimum time between swipe triggers
+
 // How strongly hand movement rotates the orb (radians per normalized unit)
 const ROTATE_SPEED = 5.0;
 // Smoothing factor for grab-point tracking (0..1, higher = snappier)
 const SMOOTHING = 0.4;
 
 export type GestureMode = "idle" | "spin" | "zoom";
+export type SwipeDirection = "left" | "right" | "down";
 
 export interface TrackerStatus {
   hands: number;
@@ -36,6 +45,10 @@ export interface HandTrackerCallbacks {
   onRotate(deltaTheta: number, deltaPhi: number): void;
   /** Called when both hands pinch and spread/close: multiply camera distance by factor. */
   onZoom(factor: number): void;
+  /** Called when one hand pinches twice quickly without moving much — a "double tap". */
+  onDoubleTap?(): void;
+  /** Called when an open (non-pinching) hand swipes quickly left/right/down. */
+  onSwipe?(direction: SwipeDirection): void;
   onStatus(status: TrackerStatus): void;
 }
 
@@ -44,9 +57,15 @@ interface Point {
   y: number;
 }
 
+interface TrailPoint extends Point {
+  t: number;
+}
+
 interface HandState {
   pinching: boolean;
   grab: Point; // smoothed pinch midpoint, mirrored
+  pinchOnsets: number[]; // timestamps (ms) of recent pinch-start events
+  trail: TrailPoint[]; // recent open-hand wrist positions, for swipe detection
 }
 
 export class HandTracker {
@@ -65,6 +84,7 @@ export class HandTracker {
   private prevSpinGrab: Point | null = null;
   private prevZoomDist: number | null = null;
   private lastStatus: TrackerStatus = { hands: 0, mode: "idle" };
+  private lastSwipeTime = 0;
 
   constructor(
     video: HTMLVideoElement,
@@ -160,20 +180,58 @@ export class HandTracker {
 
       let state = this.handStates.get(label);
       if (!state) {
-        state = { pinching: false, grab: raw };
+        state = { pinching: false, grab: raw, pinchOnsets: [], trail: [] };
         this.handStates.set(label, state);
       }
 
       // Hysteresis so the pinch doesn't flicker on/off at the threshold
+      const wasPinching = state.pinching;
       if (state.pinching && pinchRatio > PINCH_OFF) state.pinching = false;
       else if (!state.pinching && pinchRatio < PINCH_ON) state.pinching = true;
+
+      if (!wasPinching && state.pinching) {
+        const now = performance.now();
+        state.pinchOnsets = state.pinchOnsets.filter((t) => now - t < DOUBLE_TAP_WINDOW_MS);
+        state.pinchOnsets.push(now);
+        if (state.pinchOnsets.length >= 2) {
+          state.pinchOnsets = [];
+          this.callbacks.onDoubleTap?.();
+        }
+      }
 
       state.grab = {
         x: state.grab.x + (raw.x - state.grab.x) * SMOOTHING,
         y: state.grab.y + (raw.y - state.grab.y) * SMOOTHING,
       };
 
-      if (state.pinching) pinchedGrabs.push(state.grab);
+      if (state.pinching) {
+        pinchedGrabs.push(state.grab);
+        state.trail = []; // don't mix pinch/open-hand motion into swipe detection
+      } else {
+        const now = performance.now();
+        const wrist: Point = { x: 1 - lm[WRIST].x, y: lm[WRIST].y };
+        state.trail.push({ ...wrist, t: now });
+        state.trail = state.trail.filter((p) => now - p.t < SWIPE_WINDOW_MS);
+
+        if (state.trail.length >= 3 && now - this.lastSwipeTime > SWIPE_COOLDOWN_MS) {
+          const oldest = state.trail[0];
+          const dx = wrist.x - oldest.x;
+          const dy = wrist.y - oldest.y;
+
+          let direction: SwipeDirection | null = null;
+          if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy) * 1.5) {
+            direction = dx > 0 ? "right" : "left";
+          } else if (dy > SWIPE_THRESHOLD && dy > Math.abs(dx) * 1.5) {
+            direction = "down";
+          }
+
+          if (direction) {
+            this.lastSwipeTime = now;
+            state.trail = [];
+            this.callbacks.onSwipe?.(direction);
+          }
+        }
+      }
     });
 
     // Drop state for hands that left the frame

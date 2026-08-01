@@ -15,6 +15,7 @@ const VOICE_STORAGE_KEY = "nemiii-voice-uri";
 
 export interface VoiceAssistantHandle {
   toggleListening: () => void;
+  greet: () => void;
 }
 
 // Heuristic match for a female-sounding system voice. Browsers vary widely in
@@ -73,6 +74,7 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
   const [supported, setSupported] = useState(true);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedURI, setSelectedURI] = useState<string>("");
+  const [memoryCleared, setMemoryCleared] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
 
@@ -119,6 +121,18 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
     voiceRef.current = match;
     window.localStorage.setItem(VOICE_STORAGE_KEY, uri);
   }, [voices]);
+
+  const handleClearMemory = useCallback(async () => {
+    try {
+      await fetch(`${BACKEND_URL}/reset_memory`, { method: "POST" });
+      setMemoryCleared(true);
+      setTranscript("");
+      setReply("");
+      setTimeout(() => setMemoryCleared(false), 1500);
+    } catch {
+      // silent — non-critical action, backend being briefly unreachable isn't worth surfacing
+    }
+  }, []);
 
   const speak = useCallback(
     (text: string) => {
@@ -196,7 +210,23 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
     else if (state === "idle" || state === "error") startListening();
   }, [state, startListening, stopListening]);
 
-  useImperativeHandle(ref, () => ({ toggleListening }), [toggleListening]);
+  const greet = useCallback(() => {
+    if (state === "listening" || state === "thinking" || state === "speaking") return;
+    const utterance = new SpeechSynthesisUtterance("Hello Nemin, what's up today? What can we do?");
+    if (voiceRef.current) utterance.voice = voiceRef.current;
+    utterance.pitch = 1.08;
+    utterance.rate = 0.98;
+    updateState("speaking");
+    utterance.onend = () => {
+      updateState("idle");
+      startListening();
+    };
+    utterance.onerror = () => updateState("idle");
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }, [state, startListening, updateState]);
+
+  useImperativeHandle(ref, () => ({ toggleListening, greet }), [toggleListening, greet]);
 
   if (!supported) {
     return (
@@ -241,6 +271,10 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
           ))}
         </select>
       )}
+
+      <button type="button" className="memory-clear-btn" onClick={handleClearMemory}>
+        {memoryCleared ? "Memory cleared" : "Clear memory"}
+      </button>
 
       {transcript && <div className="voice-transcript">“{transcript}”</div>}
       {reply && <div className="voice-reply">{reply}</div>}

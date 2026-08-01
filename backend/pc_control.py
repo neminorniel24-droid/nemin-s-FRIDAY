@@ -18,6 +18,8 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Callable
 
+import requests
+
 import news
 
 TIMEOUT_SECONDS = 10
@@ -46,14 +48,13 @@ APP_WHITELIST: dict[str, str] = {
     "whatsapp": "whatsapp://",
 }
 
-# Common folders — key is what the LLM will say, value is a PowerShell
-# expression that resolves to the path (kept as literal env-var refs so we
-# never interpolate a user-supplied path directly).
+# Common folders — key is what the LLM will say, value is the subfolder
+# name under your Windows user profile.
 FOLDER_WHITELIST: dict[str, str] = {
-    "documents": "$env:USERPROFILE\\Documents",
-    "downloads": "$env:USERPROFILE\\Downloads",
-    "desktop": "$env:USERPROFILE\\Desktop",
-    "pictures": "$env:USERPROFILE\\Pictures",
+    "documents": "Documents",
+    "downloads": "Downloads",
+    "desktop": "Desktop",
+    "pictures": "Pictures",
 }
 
 
@@ -84,10 +85,26 @@ def _run_powershell(command: str, timeout: int = TIMEOUT_SECONDS) -> ActionResul
 
 
 def open_app(name: str) -> ActionResult:
-    exe = APP_WHITELIST.get(name.lower().strip())
-    if not exe:
-        return ActionResult(False, f"'{name}' isn't in the app whitelist")
-    return _run_powershell(f"Start-Process '{exe}'")
+    key = name.lower().strip()
+    exe = APP_WHITELIST.get(key)
+    if exe:
+        return _run_powershell(f"Start-Process '{exe}'")
+
+    # Not a known shortcut — fall back to searching everything Windows
+    # actually has installed (Get-StartApps reads Start Menu tiles, which
+    # covers Steam, PUBG, Discord, OBS, basically anything with a shortcut).
+    # This only ever launches something already installed on the machine —
+    # it can't run arbitrary code, just resolve a name to an existing app.
+    safe_name = key.replace("'", "''")
+    ps = (
+        f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{safe_name}*' }} | Select-Object -First 1; "
+        "if ($app) { Start-Process \"shell:AppsFolder\\$($app.AppID)\"; Write-Output $app.Name } "
+        "else { Write-Error 'no matching app found' }"
+    )
+    result = _run_powershell(ps)
+    if not result.ok:
+        return ActionResult(False, f"couldn't find an installed app matching '{name}'")
+    return ActionResult(True, f"launched {result.message}")
 
 
 def open_url(url: str) -> ActionResult:
@@ -112,21 +129,41 @@ def take_screenshot(_: str = "") -> ActionResult:
     return _run_powershell(ps, timeout=15)
 
 
-def set_volume(direction: str) -> ActionResult:
-    direction = direction.lower().strip()
-    key_map = {
-        "up": "([char]175)",
-        "down": "([char]174)",
-        "mute": "([char]173)",
-    }
-    key = key_map.get(direction)
-    if not key:
-        return ActionResult(False, "direction must be up, down, or mute")
+def _send_vk(char_code: str) -> ActionResult:
+    """
+    Sends a media/volume key press via WScript.Shell's SendKeys COM method.
+
+    This replaced two earlier attempts:
+    1. System.Windows.Forms.SendKeys with raw char codes — .NET's SendKeys
+       does not reliably translate these codes to the extended-key events
+       media-transport keys need.
+    2. A hand-rolled keybd_event via Add-Type C# compilation — technically
+       correct, but depends on a working C# compiler being reachable from
+       PowerShell, and failures there were being silently swallowed, which
+       is likely why nothing happened with no visible error.
+
+    WScript.Shell.SendKeys is COM-based (ships with Windows by default, no
+    compile step) and is the specifically documented approach that works
+    for this exact char-code range (0xAD–0xB3: mute, vol up/down, and all
+    four media-transport keys).
+    """
     ps = (
-        "Add-Type -AssemblyName System.Windows.Forms; "
-        f"[System.Windows.Forms.SendKeys]::SendWait({key})"
+        "$wshell = New-Object -ComObject WScript.Shell; "
+        f"$wshell.SendKeys([char]{char_code})"
     )
     return _run_powershell(ps)
+
+
+def set_volume(direction: str) -> ActionResult:
+    vk_map = {
+        "up": "0xAF",
+        "down": "0xAE",
+        "mute": "0xAD",
+    }
+    vk = vk_map.get(direction.lower().strip())
+    if not vk:
+        return ActionResult(False, "direction must be up, down, or mute")
+    return _send_vk(vk)
 
 
 def lock_workstation(_: str = "") -> ActionResult:
@@ -143,22 +180,64 @@ def type_text(text: str) -> ActionResult:
     return _run_powershell(ps)
 
 
+def open_and_type(arg: str) -> ActionResult:
+    """
+    Opens an app and types into it — for when the target app isn't already
+    focused (type_text alone only reaches whatever currently has focus).
+    Expects arg as "app_name::text to type".
+    """
+    if "::" not in arg:
+        return ActionResult(False, "expected format 'app_name::text to type'")
+    app_name, text = arg.split("::", 1)
+    app_name, text = app_name.strip(), text.strip()
+
+    open_result = open_app(app_name)
+    if not open_result.ok:
+        return open_result
+
+    escaped = text.replace("'", "''")
+    ps = (
+        "Start-Sleep -Milliseconds 1200; "  # give the app a moment to actually open and take focus
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        f"[System.Windows.Forms.SendKeys]::SendWait('{escaped}')"
+    )
+    result = _run_powershell(ps)
+    if result.ok:
+        return ActionResult(True, f"opened {app_name} and typed the text")
+    return result
+
+
 def close_app(name: str) -> ActionResult:
-    exe = APP_WHITELIST.get(name.lower().strip())
-    if not exe:
-        return ActionResult(False, f"'{name}' isn't in the app whitelist")
-    # Strip a trailing ':' (URI-scheme style entries like ms-settings: aren't processes)
-    proc_name = exe.replace(".exe", "").rstrip(":")
-    if not exe.endswith(".exe"):
-        return ActionResult(False, f"'{name}' isn't a closeable process")
-    return _run_powershell(f"Stop-Process -Name '{proc_name}' -Force -ErrorAction SilentlyContinue")
+    key = name.lower().strip()
+    exe = APP_WHITELIST.get(key)
+    if exe and exe.endswith(".exe"):
+        proc_name = exe.replace(".exe", "")
+        return _run_powershell(f"Stop-Process -Name '{proc_name}' -Force -ErrorAction SilentlyContinue")
+
+    # Fuzzy fallback: match any running process whose name contains this
+    # text. Best-effort by nature — a loose name (e.g. "game") could match
+    # more than intended, so this favors names that are reasonably specific.
+    safe_name = key.replace("'", "''")
+    ps = (
+        f"$procs = Get-Process | Where-Object {{ $_.ProcessName -like '*{safe_name}*' }}; "
+        "if ($procs) { $procs | Stop-Process -Force; ($procs | Select-Object -Unique -ExpandProperty ProcessName) -join ', ' } "
+        "else { Write-Error 'no matching process found' }"
+    )
+    result = _run_powershell(ps)
+    if not result.ok:
+        return ActionResult(False, f"no running process matching '{name}'")
+    return ActionResult(True, f"closed: {result.message}")
 
 
 def open_folder(name: str) -> ActionResult:
-    path_expr = FOLDER_WHITELIST.get(name.lower().strip())
-    if not path_expr:
+    subfolder = FOLDER_WHITELIST.get(name.lower().strip())
+    if not subfolder:
         return ActionResult(False, f"'{name}' isn't in the folder whitelist")
-    return _run_powershell(f"Start-Process '{path_expr}'")
+    # $env:USERPROFILE is bare here (not inside quotes), so PowerShell
+    # actually expands it — the previous version wrapped the whole path in
+    # single quotes, which made PowerShell treat "$env:USERPROFILE" as a
+    # literal string instead of expanding it, so it always failed.
+    return _run_powershell(f"Start-Process (Join-Path $env:USERPROFILE '{subfolder}')")
 
 
 def search_web(query: str) -> ActionResult:
@@ -173,21 +252,71 @@ def search_web(query: str) -> ActionResult:
     return _run_powershell(ps)
 
 
-def media_control(action: str) -> ActionResult:
-    key_map = {
-        "play_pause": "([char]179)",
-        "next": "([char]176)",
-        "previous": "([char]177)",
-        "stop": "([char]178)",
-    }
-    key = key_map.get(action.lower().strip())
-    if not key:
-        return ActionResult(False, "action must be play_pause, next, previous, or stop")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+
+
+def play_youtube(query: str) -> ActionResult:
+    if not query.strip():
+        return ActionResult(False, "no song/video name given")
+
+    if not YOUTUBE_API_KEY:
+        # No key configured — fall back to a search-results page. Not true
+        # auto-play (you still have to click a result), but still useful.
+        return _open_youtube_search(query)
+
+    try:
+        resp = requests.get(
+            YOUTUBE_SEARCH_URL,
+            params={
+                "part": "snippet",
+                "q": query,
+                "type": "video",
+                "maxResults": 1,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+    except requests.RequestException as e:
+        return ActionResult(False, f"YouTube search failed: {e}")
+
+    if not items:
+        return ActionResult(False, f"no YouTube results for '{query}'")
+
+    video_id = items[0]["id"]["videoId"]
+    title = items[0]["snippet"]["title"]
+    result = _run_powershell(f"Start-Process 'https://www.youtube.com/watch?v={video_id}'")
+    if result.ok:
+        return ActionResult(True, f"playing: {title}")
+    return result
+
+
+def _open_youtube_search(query: str) -> ActionResult:
+    safe_query = query.replace("'", "")
     ps = (
-        "Add-Type -AssemblyName System.Windows.Forms; "
-        f"[System.Windows.Forms.SendKeys]::SendWait({key})"
+        "Add-Type -AssemblyName System.Web; "
+        f"$q = [System.Uri]::EscapeDataString('{safe_query}'); "
+        "Start-Process \"https://www.youtube.com/results?search_query=$q\""
     )
-    return _run_powershell(ps)
+    result = _run_powershell(ps)
+    if result.ok:
+        return ActionResult(True, "opened YouTube search results (add YOUTUBE_API_KEY to backend/.env for direct auto-play)")
+    return result
+
+
+def media_control(action: str) -> ActionResult:
+    vk_map = {
+        "play_pause": "0xB3",
+        "next": "0xB0",
+        "previous": "0xB1",
+        "stop": "0xB2",
+    }
+    vk = vk_map.get(action.lower().strip())
+    if not vk:
+        return ActionResult(False, "action must be play_pause, next, previous, or stop")
+    return _send_vk(vk)
 
 
 def send_whatsapp_news(phone: str) -> ActionResult:
@@ -213,6 +342,79 @@ def send_whatsapp_news(phone: str) -> ActionResult:
     return result
 
 
+# Project paths for voice-driven dev workflow. Configure in backend/.env as
+# PROJECT_PATHS=name1=/wsl/path/one,name2=/wsl/path/two
+def _parse_project_paths() -> dict[str, str]:
+    raw = os.environ.get("PROJECT_PATHS", "")
+    result: dict[str, str] = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            name, path = pair.split("=", 1)
+            result[name.strip().lower()] = path.strip()
+    return result
+
+
+PROJECT_WHITELIST = _parse_project_paths()
+
+GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "")
+
+
+def open_project(name: str) -> ActionResult:
+    path = PROJECT_WHITELIST.get(name.lower().strip())
+    if not path:
+        return ActionResult(False, f"'{name}' isn't configured — add it to PROJECT_PATHS in backend/.env")
+    try:
+        # Runs directly in WSL (not via powershell.exe) — the VS Code
+        # WSL-remote shell command lives here, and it's what actually
+        # opens a VS Code window connected to this WSL filesystem.
+        proc = subprocess.run(["code", path], capture_output=True, text=True, timeout=15)
+        if proc.returncode == 0:
+            return ActionResult(True, f"opened {name} in VS Code")
+        return ActionResult(False, proc.stderr.strip() or "failed to open VS Code")
+    except FileNotFoundError:
+        return ActionResult(False, "'code' command not found in WSL — install the VS Code WSL extension first")
+    except subprocess.TimeoutExpired:
+        return ActionResult(False, "timed out opening VS Code")
+
+
+def open_github_repo(name: str) -> ActionResult:
+    username = GITHUB_USERNAME
+    if not username:
+        return ActionResult(False, "No GITHUB_USERNAME configured in backend/.env")
+    repo = name.strip().replace(" ", "-")
+    url = f"https://github.com/{username}/{repo}"
+    return _run_powershell(f"Start-Process '{url}'")
+
+
+def minimize_all(_: str = "") -> ActionResult:
+    # Shell.Application's MinimizeAll is a well-documented, reliable,
+    # no-compile way to do this — same family of trick as WScript.Shell.
+    ps = "(New-Object -ComObject Shell.Application).MinimizeAll()"
+    return _run_powershell(ps)
+
+
+def switch_tab(direction: str) -> ActionResult:
+    # Ctrl+Tab / Ctrl+Shift+Tab — ordinary modifier+key combos, exactly
+    # what SendKeys is designed for (unlike the media-key char codes,
+    # which needed the WScript.Shell workaround).
+    keys = "^{TAB}" if direction.lower().strip() != "previous" else "^+{TAB}"
+    ps = (
+        "$wshell = New-Object -ComObject WScript.Shell; "
+        f"$wshell.SendKeys('{keys}')"
+    )
+    return _run_powershell(ps)
+
+
+def copy_selection(_: str = "") -> ActionResult:
+    ps = "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('^c')"
+    return _run_powershell(ps)
+
+
+def paste_clipboard(_: str = "") -> ActionResult:
+    ps = "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('^v')"
+    return _run_powershell(ps)
+
+
 ACTIONS: dict[str, Callable[[str], ActionResult]] = {
     "open_app": open_app,
     "close_app": close_app,
@@ -224,7 +426,15 @@ ACTIONS: dict[str, Callable[[str], ActionResult]] = {
     "media_control": media_control,
     "lock": lock_workstation,
     "type_text": type_text,
+    "open_and_type": open_and_type,
     "send_whatsapp_news": send_whatsapp_news,
+    "play_youtube": play_youtube,
+    "minimize_all": minimize_all,
+    "switch_tab": switch_tab,
+    "copy_selection": copy_selection,
+    "paste_clipboard": paste_clipboard,
+    "open_project": open_project,
+    "open_github_repo": open_github_repo,
 }
 
 
