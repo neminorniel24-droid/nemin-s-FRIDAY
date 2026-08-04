@@ -100,7 +100,24 @@ conversation_history: list[dict[str, str]] = []
 
 @app.get("/health")
 def health():
-    return {"ok": True, "llm_configured": client is not None}
+    """
+    Reports what's actually configured, not just whether the server is up.
+    Point of this: every integration failure we've hit so far (empty .env,
+    stale process still running with an old environment, wrong working
+    directory when uvicorn started) would have been immediately obvious
+    from this endpoint instead of several rounds of guessing.
+    """
+    return {
+        "ok": True,
+        "llm_configured": client is not None,
+        "news_configured": bool(news.NEWSDATA_KEY or news.NEWSAPI_KEY),
+        "news_provider": "newsdata" if news.NEWSDATA_KEY else ("newsapi" if news.NEWSAPI_KEY else None),
+        "youtube_configured": bool(pc_control.YOUTUBE_API_KEY),
+        "whatsapp_configured": bool(pc_control.WHATSAPP_DEFAULT_NUMBER),
+        "github_username_configured": bool(pc_control.GITHUB_USERNAME),
+        "projects_configured": list(pc_control.PROJECT_WHITELIST.keys()),
+        "conversation_history_length": len(conversation_history),
+    }
 
 
 @app.post("/reset_memory")
