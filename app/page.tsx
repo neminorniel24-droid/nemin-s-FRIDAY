@@ -1,5 +1,5 @@
-import JarvisOrb from "@/components/JarvisOrb";
+import NemiiiOrb from "@/components/NemiiiOrb";
 
 export default function Home() {
-  return <JarvisOrb />;
+  return <NemiiiOrb />;
 }

@@ -1,9 +1,9 @@
 # NEMIII
 
-My own JARVIS. A holographic orb interface backed by a voice assistant
-that actually controls my PC — not a chatbot in a box, something that
-opens apps, runs searches, plays music, checks the news, and reacts to
-hand gestures across the room, built with Next.js, Three.js, MediaPipe
+My own AI assistant — a holographic orb interface backed by a voice
+assistant that actually controls my PC — not a chatbot in a box, something
+that opens apps, runs searches, plays music, checks the news, and reacts
+to hand gestures across the room, built with Next.js, Three.js, MediaPipe
 hand tracking on the frontend, and a FastAPI backend that bridges WSL
 into real control over Windows.
 
@@ -115,7 +115,7 @@ Press `G` (or click the gestures toggle) and allow camera access, then:
 - **`lib/handTracker.ts`** — MediaPipe HandLandmarker on the webcam feed.
   Pinch detection with hysteresis, plus double-pinch and open-hand swipe
   detection.
-- **`components/JarvisOrb.tsx`** — the HUD and glue between the scene, the
+- **`components/NemiiiOrb.tsx`** — the HUD and glue between the scene, the
   tracker, voice, and the dashboard.
 - **`components/VoiceAssistant.tsx`** — speech-to-text/text-to-speech and
   the connection to the backend.
