@@ -4,7 +4,7 @@
 # Run automatically at Windows login via start-nemiii.bat (see NEMIII_SETUP.md).
 
 set -e
-PROJECT_DIR="$HOME/friday/nemin-ai-assist"
+PROJECT_DIR="$HOME/friday/nemin-s-FRIDAY"
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 

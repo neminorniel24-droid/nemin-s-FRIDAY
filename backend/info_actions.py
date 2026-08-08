@@ -4,7 +4,8 @@ doing something on the Windows desktop. No PowerShell involved here; these
 just fetch data and hand back text for Nemiii to say out loud.
 
 All free, no-key APIs except GitHub (works keyless for public data, but a
-token raises the very low unauthenticated rate limit if you add one).
+token raises the very low unauthenticated rate limit if you add one) and
+Gmail (requires OAuth login, not just a key — see gmail_client.py).
 """
 
 from __future__ import annotations
@@ -146,10 +147,54 @@ def project_status(name: str) -> str:
     return f"{name} is clean, nothing pending. Last commit: {last_commit}."
 
 
+def check_email(query: str) -> str:
+    """Speaks a summary of recent emails. Read-only — this can never send,
+    delete, or modify anything, only read subjects/senders."""
+    import gmail_client
+
+    service = gmail_client.get_service()
+    if not service:
+        return (
+            "Gmail isn't authorized yet — run 'python gmail_auth.py' once "
+            "in the backend folder to set it up. See gmail_client.py for "
+            "the full setup steps."
+        )
+
+    try:
+        results = (
+            service.users()
+            .messages()
+            .list(userId="me", maxResults=5, q=query.strip())
+            .execute()
+        )
+        messages = results.get("messages", [])
+        if not messages:
+            return "No matching emails found." if query.strip() else "Your inbox looks clear — nothing new."
+
+        summaries = []
+        for m in messages:
+            msg = (
+                service.users()
+                .messages()
+                .get(userId="me", id=m["id"], format="metadata", metadataHeaders=["From", "Subject"])
+                .execute()
+            )
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "unknown sender")
+            sender_short = sender.split("<")[0].strip() or sender
+            subject = headers.get("Subject", "(no subject)")
+            summaries.append(f"{sender_short}: {subject}")
+
+        return f"You've got {len(summaries)} recent emails: " + "; ".join(summaries)
+    except Exception as e:
+        return f"Couldn't check email: {e}"
+
+
 INFO_ACTIONS = {
     "tell_news": tell_news,
     "look_up": look_up,
     "convert_currency": convert_currency,
     "check_github": check_github,
     "project_status": project_status,
+    "check_email": check_email,
 }

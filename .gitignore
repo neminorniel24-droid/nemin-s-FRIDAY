@@ -6,3 +6,5 @@ __pycache__/
 backend/.env
 .env.local
 tsconfig.tsbuildinfo
+backend/credentials.json
+backend/token.json

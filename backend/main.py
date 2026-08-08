@@ -6,9 +6,11 @@ Run inside WSL:
 
 The Next.js frontend (running on Windows, browser does STT/TTS) sends the
 recognized text here. This service asks an LLM to decide between a plain
-reply and one whitelisted PC-control action, executes it via pc_control.py
-(which shells out to powershell.exe on the Windows host), and returns a
-reply string the frontend speaks aloud.
+reply and one whitelisted action, executes it via pc_control.py (which
+shells out to powershell.exe on the Windows host, or runs WSL-side dev
+tooling) or info_actions.py (which just answers with information — no
+side effects, nothing opens), and returns a reply string the frontend
+speaks aloud.
 """
 
 import json
@@ -16,9 +18,9 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()  # must happen before importing pc_control/news — they read
-                # their env vars (NEWSDATA_KEY, WHATSAPP_DEFAULT_NUMBER, etc.)
-                # at import time, so this has to come first.
+load_dotenv()  # must happen before importing pc_control/news/info_actions —
+                # they read their env vars (NEWSDATA_KEY, WHATSAPP_DEFAULT_NUMBER,
+                # GITHUB_USERNAME, etc.) at import time, so this has to come first.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,6 +75,7 @@ If the user's request maps to one of these actions, fill "action" instead of nul
 {"type": "project_status", "arg": "<project name from the configured list — speaks git status, doesn't open anything>"}
 {"type": "open_project", "arg": "<project name from the configured list — opens it in VS Code>"}
 {"type": "open_github_repo", "arg": "<repo name — opens it in the browser>"}
+{"type": "check_email", "arg": "<optional Gmail search query like 'is:unread' or 'from:someone' — empty for most recent emails>"}
 
 If nothing matches, or the user just wants conversation, set "action" to null and just reply.
 Never invent action types or folder names outside the folder list above — but app names for

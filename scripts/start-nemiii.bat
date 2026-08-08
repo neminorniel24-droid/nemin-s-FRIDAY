@@ -12,4 +12,4 @@ REM If Startup-folder timing feels unreliable (WSL not ready yet right after
 REM login), use Task Scheduler instead: create a task triggered "At log on",
 REM with a 20-30 second delay, running this same command.
 
-wsl.exe bash -lc "~/friday/nemin-ai-assist/scripts/start-nemiii.sh"
+wsl.exe bash -lc "~/friday/nemin-s-FRIDAY/scripts/start-nemiii.sh"
