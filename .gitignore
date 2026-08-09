@@ -8,3 +8,6 @@ backend/.env
 tsconfig.tsbuildinfo
 backend/credentials.json
 backend/token.json
+.DS_Store
+Thumbs.db
+*.log
