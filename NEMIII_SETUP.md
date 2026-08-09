@@ -138,6 +138,67 @@ assistant and an open remote-execution hole.
   browser) and `scripts/start-nemiii.bat` (Windows-side trigger). See
   setup steps below.
 
+## Gmail integration (check_email)
+
+Unlike every other integration in this project, Gmail requires an actual
+login + consent flow (OAuth2), not just an API key — it's reading your
+private inbox, so Google requires you to explicitly grant access.
+
+### One-time setup
+
+1. **console.cloud.google.com** — reuse the same project as your YouTube
+   API key, or create a new one.
+
+2. **Enable the Gmail API**: search "Gmail API" in the API Library →
+   Enable. (Don't skip this — creating the OAuth client alone isn't
+   enough; the API itself has to be separately enabled on the project.)
+
+3. **Configure the OAuth consent screen** (Google Auth Platform →
+   Branding, then Audience):
+   - App name: anything (e.g. "Nemiii")
+   - User support email + developer contact: your own email
+   - User type: **External**
+   - Publishing status: leave as **Testing** (avoids needing Google's
+     app verification review, which isn't necessary for personal use)
+   - **Test users**: add the exact Gmail address you want Nemiii reading
+     mail from. This step is easy to miss and causes an
+     "Access blocked... Error 403: access_denied" page if skipped.
+
+4. **Create the OAuth client** (Clients tab → Create client):
+   - Application type: **Desktop app**
+   - After creating, a popup shows the Client ID/Secret —
+     click **Download JSON** immediately (you can't come back for the
+     secret later, though you can view/download the full client again
+     from the Clients list if you miss this popup)
+
+5. **Save the downloaded file**:
+```bash
+   mv /mnt/c/Users/<you>/Downloads/client_secret_*.json backend/credentials.json
+```
+   (Browser downloads on Windows land in the Windows Downloads folder,
+   which from WSL is under `/mnt/c/Users/<you>/Downloads/`, not `~/Downloads`.)
+
+6. **Authorize** (one time):
+```bash
+   cd backend
+   source venv/bin/activate
+   python gmail_auth.py
+```
+   Prints a URL — since this runs inside WSL, it likely won't auto-open a
+   browser; copy the URL into your Windows browser manually. Sign in with
+   the **same account** you added as a test user in step 3. On success,
+   saves `token.json`, which the backend reuses automatically from then on.
+
+`credentials.json` and `token.json` are both in `.gitignore` — never
+commit either, they're your actual account credentials.
+
+### Try it
+
+"Check my email" / "check for unread mail" (uses Gmail search syntax,
+e.g. `is:unread`, `from:someone@example.com`) — speaks back sender +
+subject for the most recent matches. Read-only: this can never send,
+delete, or modify anything in your mailbox.
+
 ### Setting up auto-launch
 
 One-time build (production start is faster/more stable for autostart than
