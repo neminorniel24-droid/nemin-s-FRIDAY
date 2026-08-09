@@ -1,5 +1,8 @@
 # NEMIII
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
+
 My own AI assistant — a holographic orb interface backed by a voice
 assistant that actually controls my PC — not a chatbot in a box, something
 that opens apps, runs searches, plays music, checks the news, and reacts
