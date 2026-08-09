@@ -48,5 +48,9 @@ jobs:
           pip install -r backend/requirements.txt
 
       - name: Compile Python files
-        run: |
-          python -m compileall -q backend
+  run: |
+    python -m compileall -q backend
+
+- name: Run backend tests
+  run: |
+    pytest -v
