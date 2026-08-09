@@ -354,6 +354,9 @@ speak to reference them ("open inr-radar", "status of nemiii").
 terminal and have VS Code open, you're set.
 
 ## Known v1 limitations / natural next steps
+- Gmail requires a manual one-time OAuth setup (see the Gmail section above) — it's not automatic like the other integrations.
+- Conversation memory is in-process only; it resets whenever the backend restarts.
+
 
 - No wake word — push-to-talk only. Adding "hey Nemiii" detection means
   either a lightweight local wake-word model (e.g. openWakeWord) always
