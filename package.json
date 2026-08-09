@@ -21,5 +21,8 @@
     "@types/three": "^0.185.0",
     "typescript": "^5"
   },
-  "description": "Voice-controlled PC assistant with a holographic orb UI"
+  "description": "Voice-controlled PC assistant with a holographic orb UI",
+  "engines": {
+    "node": ">=20"
+  }
 }
