@@ -65,6 +65,7 @@ If the user's request maps to one of these actions, fill "action" instead of nul
 {"type": "send_whatsapp_news", "arg": "<phone number in +countrycode format, or empty string to use the default configured number>"}
 {"type": "play_youtube", "arg": "<song or video name to play>"}
 {"type": "minimize_all", "arg": ""}
+{"type": "set_brightness", "arg": "<up|down|or a number 0-100>"}
 {"type": "switch_tab", "arg": "<next|previous>"}
 {"type": "copy_selection", "arg": ""}
 {"type": "paste_clipboard", "arg": ""}
