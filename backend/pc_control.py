@@ -2,7 +2,9 @@
 pc_control.py
 
 Executes a *whitelisted* set of actions on the Windows host from inside WSL,
-by shelling out to powershell.exe (WSL <-> Windows interop, enabled by default).
+by shelling out to powershell.exe (WSL <-> Windows interop, enabled by default),
+or — for dev tooling specifically — directly in WSL, since that's where the
+project files and `code` CLI actually live.
 
 Design principle: the LLM never gets to run arbitrary shell text. It can only
 select one of the ACTIONS below and supply the specific argument that action
@@ -24,11 +26,6 @@ import news
 
 TIMEOUT_SECONDS = 10
 
-WHATSAPP_DEFAULT_NUMBER = os.environ.get("WHATSAPP_DEFAULT_NUMBER", "")
-
-# Apps you're willing to let the assistant launch by name.
-# Add more entries as you need them — key is what the LLM will say,
-# value is what Windows actually runs.
 APP_WHITELIST: dict[str, str] = {
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
@@ -48,14 +45,14 @@ APP_WHITELIST: dict[str, str] = {
     "whatsapp": "whatsapp://",
 }
 
-# Common folders — key is what the LLM will say, value is the subfolder
-# name under your Windows user profile.
 FOLDER_WHITELIST: dict[str, str] = {
     "documents": "Documents",
     "downloads": "Downloads",
     "desktop": "Desktop",
     "pictures": "Pictures",
 }
+
+WHATSAPP_DEFAULT_NUMBER = os.environ.get("WHATSAPP_DEFAULT_NUMBER", "")
 
 
 @dataclass
@@ -90,11 +87,6 @@ def open_app(name: str) -> ActionResult:
     if exe:
         return _run_powershell(f"Start-Process '{exe}'")
 
-    # Not a known shortcut — fall back to searching everything Windows
-    # actually has installed (Get-StartApps reads Start Menu tiles, which
-    # covers Steam, PUBG, Discord, OBS, basically anything with a shortcut).
-    # This only ever launches something already installed on the machine —
-    # it can't run arbitrary code, just resolve a name to an existing app.
     safe_name = key.replace("'", "''")
     ps = (
         f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{safe_name}*' }} | Select-Object -First 1; "
@@ -107,12 +99,37 @@ def open_app(name: str) -> ActionResult:
     return ActionResult(True, f"launched {result.message}")
 
 
+def close_app(name: str) -> ActionResult:
+    key = name.lower().strip()
+    exe = APP_WHITELIST.get(key)
+    if exe and exe.endswith(".exe"):
+        proc_name = exe.replace(".exe", "")
+        return _run_powershell(f"Stop-Process -Name '{proc_name}' -Force -ErrorAction SilentlyContinue")
+
+    safe_name = key.replace("'", "''")
+    ps = (
+        f"$procs = Get-Process | Where-Object {{ $_.ProcessName -like '*{safe_name}*' }}; "
+        "if ($procs) { $procs | Stop-Process -Force; ($procs | Select-Object -Unique -ExpandProperty ProcessName) -join ', ' } "
+        "else { Write-Error 'no matching process found' }"
+    )
+    result = _run_powershell(ps)
+    if not result.ok:
+        return ActionResult(False, f"no running process matching '{name}'")
+    return ActionResult(True, f"closed: {result.message}")
+
+
 def open_url(url: str) -> ActionResult:
     if not (url.startswith("http://") or url.startswith("https://")):
         return ActionResult(False, "only http(s) URLs are allowed")
-    # Escape single quotes defensively before interpolating into PowerShell.
     safe_url = url.replace("'", "")
     return _run_powershell(f"Start-Process '{safe_url}'")
+
+
+def open_folder(name: str) -> ActionResult:
+    subfolder = FOLDER_WHITELIST.get(name.lower().strip())
+    if not subfolder:
+        return ActionResult(False, f"'{name}' isn't in the folder whitelist")
+    return _run_powershell(f"Start-Process (Join-Path $env:USERPROFILE '{subfolder}')")
 
 
 def take_screenshot(_: str = "") -> ActionResult:
@@ -130,23 +147,6 @@ def take_screenshot(_: str = "") -> ActionResult:
 
 
 def _send_vk(char_code: str) -> ActionResult:
-    """
-    Sends a media/volume key press via WScript.Shell's SendKeys COM method.
-
-    This replaced two earlier attempts:
-    1. System.Windows.Forms.SendKeys with raw char codes — .NET's SendKeys
-       does not reliably translate these codes to the extended-key events
-       media-transport keys need.
-    2. A hand-rolled keybd_event via Add-Type C# compilation — technically
-       correct, but depends on a working C# compiler being reachable from
-       PowerShell, and failures there were being silently swallowed, which
-       is likely why nothing happened with no visible error.
-
-    WScript.Shell.SendKeys is COM-based (ships with Windows by default, no
-    compile step) and is the specifically documented approach that works
-    for this exact char-code range (0xAD–0xB3: mute, vol up/down, and all
-    four media-transport keys).
-    """
     ps = (
         "$wshell = New-Object -ComObject WScript.Shell; "
         f"$wshell.SendKeys([char]{char_code})"
@@ -155,14 +155,18 @@ def _send_vk(char_code: str) -> ActionResult:
 
 
 def set_volume(direction: str) -> ActionResult:
-    vk_map = {
-        "up": "0xAF",
-        "down": "0xAE",
-        "mute": "0xAD",
-    }
+    vk_map = {"up": "0xAF", "down": "0xAE", "mute": "0xAD"}
     vk = vk_map.get(direction.lower().strip())
     if not vk:
         return ActionResult(False, "direction must be up, down, or mute")
+    return _send_vk(vk)
+
+
+def media_control(action: str) -> ActionResult:
+    vk_map = {"play_pause": "0xB3", "next": "0xB0", "previous": "0xB1", "stop": "0xB2"}
+    vk = vk_map.get(action.lower().strip())
+    if not vk:
+        return ActionResult(False, "action must be play_pause, next, previous, or stop")
     return _send_vk(vk)
 
 
@@ -171,7 +175,6 @@ def lock_workstation(_: str = "") -> ActionResult:
 
 
 def type_text(text: str) -> ActionResult:
-    # Sent to whatever window currently has focus on the Windows host.
     escaped = text.replace("'", "''")
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms; "
@@ -181,11 +184,6 @@ def type_text(text: str) -> ActionResult:
 
 
 def open_and_type(arg: str) -> ActionResult:
-    """
-    Opens an app and types into it — for when the target app isn't already
-    focused (type_text alone only reaches whatever currently has focus).
-    Expects arg as "app_name::text to type".
-    """
     if "::" not in arg:
         return ActionResult(False, "expected format 'app_name::text to type'")
     app_name, text = arg.split("::", 1)
@@ -197,7 +195,7 @@ def open_and_type(arg: str) -> ActionResult:
 
     escaped = text.replace("'", "''")
     ps = (
-        "Start-Sleep -Milliseconds 1200; "  # give the app a moment to actually open and take focus
+        "Start-Sleep -Milliseconds 1200; "
         "Add-Type -AssemblyName System.Windows.Forms; "
         f"[System.Windows.Forms.SendKeys]::SendWait('{escaped}')"
     )
@@ -207,53 +205,21 @@ def open_and_type(arg: str) -> ActionResult:
     return result
 
 
-def close_app(name: str) -> ActionResult:
-    key = name.lower().strip()
-    exe = APP_WHITELIST.get(key)
-    if exe and exe.endswith(".exe"):
-        proc_name = exe.replace(".exe", "")
-        return _run_powershell(f"Stop-Process -Name '{proc_name}' -Force -ErrorAction SilentlyContinue")
-
-    # Fuzzy fallback: match any running process whose name contains this
-    # text. Best-effort by nature — a loose name (e.g. "game") could match
-    # more than intended, so this favors names that are reasonably specific.
-    safe_name = key.replace("'", "''")
-    ps = (
-        f"$procs = Get-Process | Where-Object {{ $_.ProcessName -like '*{safe_name}*' }}; "
-        "if ($procs) { $procs | Stop-Process -Force; ($procs | Select-Object -Unique -ExpandProperty ProcessName) -join ', ' } "
-        "else { Write-Error 'no matching process found' }"
-    )
-    result = _run_powershell(ps)
-    if not result.ok:
-        return ActionResult(False, f"no running process matching '{name}'")
-    return ActionResult(True, f"closed: {result.message}")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 
 
-def open_folder(name: str) -> ActionResult:
-    subfolder = FOLDER_WHITELIST.get(name.lower().strip())
-    if not subfolder:
-        return ActionResult(False, f"'{name}' isn't in the folder whitelist")
-    # $env:USERPROFILE is bare here (not inside quotes), so PowerShell
-    # actually expands it — the previous version wrapped the whole path in
-    # single quotes, which made PowerShell treat "$env:USERPROFILE" as a
-    # literal string instead of expanding it, so it always failed.
-    return _run_powershell(f"Start-Process (Join-Path $env:USERPROFILE '{subfolder}')")
-
-
-def search_web(query: str) -> ActionResult:
-    if not query.strip():
-        return ActionResult(False, "no search query given")
+def _open_youtube_search(query: str) -> ActionResult:
     safe_query = query.replace("'", "")
     ps = (
         "Add-Type -AssemblyName System.Web; "
         f"$q = [System.Uri]::EscapeDataString('{safe_query}'); "
-        "Start-Process \"https://www.google.com/search?q=$q\""
+        "Start-Process \"https://www.youtube.com/results?search_query=$q\""
     )
-    return _run_powershell(ps)
-
-
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+    result = _run_powershell(ps)
+    if result.ok:
+        return ActionResult(True, "opened YouTube search results (add YOUTUBE_API_KEY to backend/.env for direct auto-play)")
+    return result
 
 
 def play_youtube(query: str) -> ActionResult:
@@ -261,20 +227,12 @@ def play_youtube(query: str) -> ActionResult:
         return ActionResult(False, "no song/video name given")
 
     if not YOUTUBE_API_KEY:
-        # No key configured — fall back to a search-results page. Not true
-        # auto-play (you still have to click a result), but still useful.
         return _open_youtube_search(query)
 
     try:
         resp = requests.get(
             YOUTUBE_SEARCH_URL,
-            params={
-                "part": "snippet",
-                "q": query,
-                "type": "video",
-                "maxResults": 1,
-                "key": YOUTUBE_API_KEY,
-            },
+            params={"part": "snippet", "q": query, "type": "video", "maxResults": 1, "key": YOUTUBE_API_KEY},
             timeout=10,
         )
         resp.raise_for_status()
@@ -293,57 +251,76 @@ def play_youtube(query: str) -> ActionResult:
     return result
 
 
-def _open_youtube_search(query: str) -> ActionResult:
+def search_web(query: str) -> ActionResult:
+    if not query.strip():
+        return ActionResult(False, "no search query given")
     safe_query = query.replace("'", "")
     ps = (
         "Add-Type -AssemblyName System.Web; "
         f"$q = [System.Uri]::EscapeDataString('{safe_query}'); "
-        "Start-Process \"https://www.youtube.com/results?search_query=$q\""
+        "Start-Process \"https://www.google.com/search?q=$q\""
     )
-    result = _run_powershell(ps)
-    if result.ok:
-        return ActionResult(True, "opened YouTube search results (add YOUTUBE_API_KEY to backend/.env for direct auto-play)")
-    return result
+    return _run_powershell(ps)
 
 
-def media_control(action: str) -> ActionResult:
-    vk_map = {
-        "play_pause": "0xB3",
-        "next": "0xB0",
-        "previous": "0xB1",
-        "stop": "0xB2",
-    }
-    vk = vk_map.get(action.lower().strip())
-    if not vk:
-        return ActionResult(False, "action must be play_pause, next, previous, or stop")
-    return _send_vk(vk)
+def minimize_all(_: str = "") -> ActionResult:
+    ps = "(New-Object -ComObject Shell.Application).MinimizeAll()"
+    return _run_powershell(ps)
 
 
-def send_whatsapp_news(phone: str) -> ActionResult:
-    number = phone.strip() or WHATSAPP_DEFAULT_NUMBER
-    if not number:
-        return ActionResult(
-            False,
-            "no phone number given and WHATSAPP_DEFAULT_NUMBER isn't set in backend/.env",
+def switch_tab(direction: str) -> ActionResult:
+    keys = "^{TAB}" if direction.lower().strip() != "previous" else "^+{TAB}"
+    ps = (
+        "$wshell = New-Object -ComObject WScript.Shell; "
+        f"$wshell.SendKeys('{keys}')"
+    )
+    return _run_powershell(ps)
+
+
+def copy_selection(_: str = "") -> ActionResult:
+    ps = "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('^c')"
+    return _run_powershell(ps)
+
+
+def paste_clipboard(_: str = "") -> ActionResult:
+    ps = "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('^v')"
+    return _run_powershell(ps)
+
+
+def set_brightness(arg: str) -> ActionResult:
+    """
+    Adjusts screen brightness via WMI. Only works on laptop displays or
+    monitors with DDC/CI support recognized by Windows — external
+    monitors without that support will fail, which is a hardware
+    limitation, not a bug here.
+    """
+    direction = arg.strip().lower()
+    if direction in ("up", "down"):
+        ps = (
+            "$b = (Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness).CurrentBrightness; "
+            f"$new = [Math]::Max(0, [Math]::Min(100, $b {'+ 20' if direction == 'up' else '- 20'})); "
+            "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, $new); "
+            "Write-Output $new"
+        )
+    else:
+        try:
+            level = max(0, min(100, int(direction)))
+        except ValueError:
+            return ActionResult(False, "brightness must be 'up', 'down', or a number 0-100")
+        ps = (
+            f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, {level}); "
+            f"Write-Output {level}"
         )
 
-    summary = news.fetch_world_news(limit=5)
-    encoded_text = urllib.parse.quote(summary)
-    encoded_number = urllib.parse.quote(number.replace(" ", ""))
-    link = f"https://wa.me/{encoded_number}?text={encoded_text}"
-
-    # Opens the chat with the message pre-filled. Deliberately does NOT
-    # auto-press send — WhatsApp's load time varies too much to reliably
-    # time a scripted Enter keypress, and auto-sending an unreviewed
-    # message is worth avoiding. Review it, then hit send yourself.
-    result = _run_powershell(f"Start-Process '{link}'")
+    result = _run_powershell(ps)
     if result.ok:
-        return ActionResult(True, f"Opened WhatsApp chat with {number}, news pre-filled — review and hit send.")
-    return result
+        return ActionResult(True, f"brightness set to {result.message}%")
+    return ActionResult(
+        False,
+        f"couldn't change brightness (only works on laptop screens or DDC/CI-capable monitors): {result.message}",
+    )
 
 
-# Project paths for voice-driven dev workflow. Configure in backend/.env as
-# PROJECT_PATHS=name1=/wsl/path/one,name2=/wsl/path/two
 def _parse_project_paths() -> dict[str, str]:
     raw = os.environ.get("PROJECT_PATHS", "")
     result: dict[str, str] = {}
@@ -364,9 +341,6 @@ def open_project(name: str) -> ActionResult:
     if not path:
         return ActionResult(False, f"'{name}' isn't configured — add it to PROJECT_PATHS in backend/.env")
     try:
-        # Runs directly in WSL (not via powershell.exe) — the VS Code
-        # WSL-remote shell command lives here, and it's what actually
-        # opens a VS Code window connected to this WSL filesystem.
         proc = subprocess.run(["code", path], capture_output=True, text=True, timeout=15)
         if proc.returncode == 0:
             return ActionResult(True, f"opened {name} in VS Code")
@@ -386,33 +360,20 @@ def open_github_repo(name: str) -> ActionResult:
     return _run_powershell(f"Start-Process '{url}'")
 
 
-def minimize_all(_: str = "") -> ActionResult:
-    # Shell.Application's MinimizeAll is a well-documented, reliable,
-    # no-compile way to do this — same family of trick as WScript.Shell.
-    ps = "(New-Object -ComObject Shell.Application).MinimizeAll()"
-    return _run_powershell(ps)
+def send_whatsapp_news(phone: str) -> ActionResult:
+    number = phone.strip() or WHATSAPP_DEFAULT_NUMBER
+    if not number:
+        return ActionResult(False, "no phone number given and WHATSAPP_DEFAULT_NUMBER isn't set in backend/.env")
 
+    summary = news.fetch_world_news(limit=5)
+    encoded_text = urllib.parse.quote(summary)
+    encoded_number = urllib.parse.quote(number.replace(" ", ""))
+    link = f"https://wa.me/{encoded_number}?text={encoded_text}"
 
-def switch_tab(direction: str) -> ActionResult:
-    # Ctrl+Tab / Ctrl+Shift+Tab — ordinary modifier+key combos, exactly
-    # what SendKeys is designed for (unlike the media-key char codes,
-    # which needed the WScript.Shell workaround).
-    keys = "^{TAB}" if direction.lower().strip() != "previous" else "^+{TAB}"
-    ps = (
-        "$wshell = New-Object -ComObject WScript.Shell; "
-        f"$wshell.SendKeys('{keys}')"
-    )
-    return _run_powershell(ps)
-
-
-def copy_selection(_: str = "") -> ActionResult:
-    ps = "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('^c')"
-    return _run_powershell(ps)
-
-
-def paste_clipboard(_: str = "") -> ActionResult:
-    ps = "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('^v')"
-    return _run_powershell(ps)
+    result = _run_powershell(f"Start-Process '{link}'")
+    if result.ok:
+        return ActionResult(True, f"Opened WhatsApp chat with {number}, news pre-filled — review and hit send.")
+    return result
 
 
 ACTIONS: dict[str, Callable[[str], ActionResult]] = {
@@ -433,6 +394,7 @@ ACTIONS: dict[str, Callable[[str], ActionResult]] = {
     "switch_tab": switch_tab,
     "copy_selection": copy_selection,
     "paste_clipboard": paste_clipboard,
+    "set_brightness": set_brightness,
     "open_project": open_project,
     "open_github_repo": open_github_repo,
 }
