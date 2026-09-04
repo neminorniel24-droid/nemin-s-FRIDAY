@@ -32,7 +32,7 @@ import news
 import info_actions
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")  # check console.groq.com/docs/models for current options
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")  # check console.groq.com/docs/models for current options
 
 app = FastAPI(title="Nemiii Backend")
 
