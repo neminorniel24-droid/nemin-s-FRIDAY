@@ -5,13 +5,14 @@ import { createOrbScene, type OrbSceneApi } from "@/lib/orbScene";
 import { HandTracker, type TrackerStatus, type SwipeDirection } from "@/lib/handTracker";
 import { VoiceAssistant, type VoiceState, type VoiceAssistantHandle } from "@/components/VoiceAssistant";
 import { InfoDashboard } from "@/components/InfoDashboard";
+import { VrmAvatar, type VrmAvatarHandle, type AvatarState } from "@/components/VrmAvatar";
 
 type CameraState = "off" | "starting" | "on" | "error";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 const MODE_LABEL: Record<TrackerStatus["mode"], string> = {
-  idle: "STANDBY",
+  idle: "IDLE",
   spin: "SPIN",
   zoom: "ZOOM",
 };
@@ -23,11 +24,20 @@ export default function NemiiiOrb() {
   const sceneRef = useRef<OrbSceneApi | null>(null);
   const trackerRef = useRef<HandTracker | null>(null);
   const voiceRef = useRef<VoiceAssistantHandle>(null);
+  const vrmHandleRef = useRef<VrmAvatarHandle>(null);
 
   const [camera, setCamera] = useState<CameraState>("off");
   const [status, setStatus] = useState<TrackerStatus>({ hands: 0, mode: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+
+  const [avatarMode, setAvatarMode] = useState(false);
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+
+  const setContainerRef = useCallback((el: HTMLDivElement | null) => {
+    containerRef.current = el;
+    setContainerEl(el);
+  }, []);
 
   const handleSwipe = useCallback((direction: SwipeDirection) => {
     const action =
@@ -39,13 +49,11 @@ export default function NemiiiOrb() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(action),
-    }).catch(() => {
-      // Silent — a failed gesture action isn't worth interrupting the flow for;
-      // the same action is always available by voice as a fallback.
-    });
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
+    if (avatarMode) return;
     const container = containerRef.current;
     if (!container) return;
     const scene = createOrbScene(container);
@@ -56,13 +64,8 @@ export default function NemiiiOrb() {
       scene.dispose();
       sceneRef.current = null;
     };
-  }, []);
+  }, [avatarMode]);
 
-  // Greet automatically shortly after the page loads — e.g. when you open
-  // your laptop and this is your startup page. Only fires once per load.
-  // Note: if your browser blocks audio until you've interacted with the
-  // page at least once, the first greeting may be silent — subsequent ones
-  // (double-pinch, or a page reload after any click) will work normally.
   useEffect(() => {
     const timer = setTimeout(() => {
       voiceRef.current?.greet();
@@ -70,12 +73,14 @@ export default function NemiiiOrb() {
     return () => clearTimeout(timer);
   }, []);
 
-  const stopGestures = useCallback(() => {
-    trackerRef.current?.stop();
-    trackerRef.current = null;
-    setCamera("off");
-    setStatus({ hands: 0, mode: "idle" });
-  }, []);
+  useEffect(() => {
+    if (!avatarMode) return;
+    const mapped: AvatarState =
+      voiceState === "listening" || voiceState === "thinking" || voiceState === "speaking"
+        ? voiceState
+        : "idle";
+    vrmHandleRef.current?.setState(mapped);
+  }, [voiceState, avatarMode]);
 
   const startGestures = useCallback(async () => {
     const video = videoRef.current;
@@ -99,14 +104,16 @@ export default function NemiiiOrb() {
       setCamera("on");
     } catch (err) {
       trackerRef.current = null;
-      tracker.stop();
       setCamera("error");
-      setError(
-        err instanceof DOMException && err.name === "NotAllowedError"
-          ? "CAMERA ACCESS DENIED"
-          : "TRACKING INIT FAILED",
-      );
+      setError(err instanceof Error ? err.message : "Couldn't access the camera");
     }
+  }, [handleSwipe]);
+
+  const stopGestures = useCallback(() => {
+    trackerRef.current?.stop();
+    trackerRef.current = null;
+    setCamera("off");
+    setStatus({ hands: 0, mode: "idle" });
   }, []);
 
   const toggleGestures = useCallback(() => {
@@ -115,20 +122,9 @@ export default function NemiiiOrb() {
   }, [startGestures, stopGestures]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
       switch (e.key) {
-        case "+":
-        case "=":
-          sceneRef.current?.zoomIn();
-          break;
-        case "-":
-        case "_":
-          sceneRef.current?.zoomOut();
-          break;
-        case "r":
-        case "R":
-          sceneRef.current?.resetView();
-          break;
         case "g":
         case "G":
           toggleGestures();
@@ -137,24 +133,34 @@ export default function NemiiiOrb() {
         case "V":
           voiceRef.current?.toggleListening();
           break;
+        case "r":
+        case "R":
+          sceneRef.current?.resetView();
+          break;
+        case "+":
+        case "=":
+          sceneRef.current?.zoomIn();
+          break;
+        case "-":
+        case "_":
+          sceneRef.current?.zoomOut();
+          break;
       }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
   }, [toggleGestures]);
 
   const cameraOn = camera === "on";
 
   return (
     <>
-      <div
-        ref={containerRef}
-        className={`orb-root${voiceState !== "idle" && voiceState !== "error" ? ` voice-${voiceState}` : ""}`}
-      />
+      <div ref={setContainerRef} className={`orb-root${voiceState !== "idle" && voiceState !== "error" ? ` voice-${voiceState}` : ""}`}>
+        {avatarMode && containerEl && <VrmAvatar ref={vrmHandleRef} container={containerEl} />}
+      </div>
 
-      <div className="overlay-vignette" />
-      <div className="overlay-grain" />
-      <div className="overlay-scanlines" />
+      <video ref={videoRef} className="camera-feed" autoPlay playsInline muted style={{ display: cameraOn ? "block" : "none" }} />
+      <canvas ref={overlayRef} className="camera-overlay" style={{ display: cameraOn ? "block" : "none" }} />
 
       <div className="hud hud-title">
         N.E.M.I.I.I.
@@ -181,46 +187,42 @@ export default function NemiiiOrb() {
             <span className="key">G</span> hand gestures&nbsp;&nbsp;
             <span className="key">V</span> voice&nbsp;&nbsp;
             <span className="key">R</span> reset&nbsp;&nbsp;
-            <span className="key">+/−</span> zoom
+            <span className="key">+/−</span> zoom&nbsp;&nbsp;
+            <span className="key">SAY "COME HERE"</span> summon avatar
           </div>
         )}
       </div>
 
       <div className="hud hud-controls">
-        <VoiceAssistant ref={voiceRef} onStateChange={setVoiceState} />
+        <VoiceAssistant ref={voiceRef} onStateChange={setVoiceState} onSummonPhrase={() => setAvatarMode(true)} />
+
+        {avatarMode && (
+          <button type="button" className="hud-btn" onClick={() => setAvatarMode(false)}>
+            BACK TO ORB
+          </button>
+        )}
 
         <div className={`camera-panel${cameraOn ? " visible" : ""}`}>
-          {/* Mirrored preview so it behaves like a mirror */}
-          <video ref={videoRef} muted playsInline className="camera-video" />
-          <canvas ref={overlayRef} width={208} height={156} className="camera-overlay" />
-          <div className="camera-status">
-            {status.hands > 0
-              ? `${status.hands} HAND${status.hands > 1 ? "S" : ""} · ${MODE_LABEL[status.mode]}`
-              : "SHOW HANDS"}
+          <div className="hud-row">
+            <span>HANDS: {status.hands}</span>
+            <span>MODE: {MODE_LABEL[status.mode]}</span>
           </div>
         </div>
 
         {error && <div className="hud-error">{error}</div>}
 
+        <button type="button" className="hud-btn" onClick={toggleGestures} aria-pressed={cameraOn}>
+          {camera === "starting" ? "STARTING…" : cameraOn ? "GESTURES ON" : "GESTURES OFF"}
+        </button>
+
         <div className="hud-row">
-          <button
-            type="button"
-            className="hud-btn"
-            aria-pressed={cameraOn}
-            onClick={toggleGestures}
-            disabled={camera === "starting"}
-          >
-            {camera === "starting" ? "INITIALIZING…" : cameraOn ? "GESTURES ON" : "GESTURES OFF"}
-          </button>
-        </div>
-        <div className="hud-row">
-          <button type="button" className="hud-btn" onClick={() => sceneRef.current?.zoomIn()} aria-label="Zoom in">
+          <button type="button" className="hud-btn small" onClick={() => sceneRef.current?.zoomIn()}>
             +
           </button>
-          <button type="button" className="hud-btn" onClick={() => sceneRef.current?.zoomOut()} aria-label="Zoom out">
+          <button type="button" className="hud-btn small" onClick={() => sceneRef.current?.zoomOut()}>
             −
           </button>
-          <button type="button" className="hud-btn" onClick={() => sceneRef.current?.resetView()}>
+          <button type="button" className="hud-btn small" onClick={() => sceneRef.current?.resetView()}>
             RESET
           </button>
         </div>

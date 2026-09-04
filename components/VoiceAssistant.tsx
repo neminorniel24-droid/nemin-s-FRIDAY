@@ -13,42 +13,15 @@ interface ChatResponse {
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const VOICE_STORAGE_KEY = "nemiii-voice-uri";
 
+// Phrases that summon the avatar instead of going through the backend —
+// handled entirely client-side, no LLM round-trip needed for a UI mode switch.
+const SUMMON_PHRASES = ["come here", "come here nemiii", "show yourself"];
+
 export interface VoiceAssistantHandle {
   toggleListening: () => void;
   greet: () => void;
 }
 
-// Heuristic match for a female-sounding system voice. Browsers vary widely in
-// what's installed — this just picks the best available, it's not guaranteed
-// to find one on every machine.
-const FEMALE_VOICE_HINTS = [
-  "female",
-  "zira", // Windows
-  "samantha", // macOS
-  "susan",
-  "victoria",
-  "karen",
-  "moira",
-  "tessa",
-  "fiona",
-  "google uk english female",
-  "google us english",
-  "aria", // Edge neural voices
-  "jenny",
-];
-
-function pickFemaleVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
-  if (!voices.length) return null;
-  const englishVoices = voices.filter((v) => v.lang.toLowerCase().startsWith("en"));
-  const pool = englishVoices.length ? englishVoices : voices;
-  for (const hint of FEMALE_VOICE_HINTS) {
-    const match = pool.find((v) => v.name.toLowerCase().includes(hint));
-    if (match) return match;
-  }
-  return pool[0];
-}
-
-// Minimal typing shim — the Web Speech API isn't in TS's lib.dom yet.
 type SpeechRecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
@@ -66,8 +39,37 @@ function getSpeechRecognition(): (new () => SpeechRecognitionLike) | null {
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
-export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?: (s: VoiceState) => void }>(
-  function VoiceAssistant({ onStateChange }, ref) {
+const FEMALE_VOICE_HINTS = [
+  "female",
+  "zira",
+  "samantha",
+  "susan",
+  "victoria",
+  "karen",
+  "moira",
+  "tessa",
+  "fiona",
+  "google uk english female",
+  "google us english",
+  "aria",
+  "jenny",
+];
+
+function pickFemaleVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+  if (!voices.length) return null;
+  const englishVoices = voices.filter((v) => v.lang.toLowerCase().startsWith("en"));
+  const pool = englishVoices.length ? englishVoices : voices;
+  for (const hint of FEMALE_VOICE_HINTS) {
+    const match = pool.find((v) => v.name.toLowerCase().includes(hint));
+    if (match) return match;
+  }
+  return pool[0];
+}
+
+export const VoiceAssistant = forwardRef
+  VoiceAssistantHandle,
+  { onStateChange?: (s: VoiceState) => void; onSummonPhrase?: () => void }
+>(function VoiceAssistant({ onStateChange, onSummonPhrase }, ref) {
   const [state, setState] = useState<VoiceState>("idle");
   const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
@@ -115,12 +117,15 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
     };
   }, []);
 
-  const handleVoiceChange = useCallback((uri: string) => {
-    setSelectedURI(uri);
-    const match = voices.find((v) => v.voiceURI === uri) ?? null;
-    voiceRef.current = match;
-    window.localStorage.setItem(VOICE_STORAGE_KEY, uri);
-  }, [voices]);
+  const handleVoiceChange = useCallback(
+    (uri: string) => {
+      setSelectedURI(uri);
+      const match = voices.find((v) => v.voiceURI === uri) ?? null;
+      voiceRef.current = match;
+      window.localStorage.setItem(VOICE_STORAGE_KEY, uri);
+    },
+    [voices],
+  );
 
   const handleClearMemory = useCallback(async () => {
     try {
@@ -184,6 +189,15 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
     recognition.onresult = (event: any) => {
       const text = event.results[0][0].transcript;
       setTranscript(text);
+
+      const lower = text.toLowerCase();
+      const isSummon = SUMMON_PHRASES.some((phrase) => lower.includes(phrase));
+      if (isSummon) {
+        onSummonPhrase?.();
+        speak("Coming.");
+        return;
+      }
+
       void sendToBackend(text);
     };
     recognition.onerror = () => {
@@ -197,7 +211,7 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
     recognitionRef.current = recognition;
     updateState("listening");
     recognition.start();
-  }, [sendToBackend, updateState]);
+  }, [sendToBackend, updateState, onSummonPhrase, speak]);
 
   const stopListening = useCallback(() => {
     recognitionRef.current?.stop();
@@ -212,7 +226,7 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
 
   const greet = useCallback(() => {
     if (state === "listening" || state === "thinking" || state === "speaking") return;
-    const utterance = new SpeechSynthesisUtterance("Hello boss. Systems online. What are we on today?");
+    const utterance = new SpeechSynthesisUtterance("Hello boss. Systems online. What are we working on today?");
     if (voiceRef.current) utterance.voice = voiceRef.current;
     utterance.pitch = 1.08;
     utterance.rate = 0.98;
@@ -276,11 +290,10 @@ export const VoiceAssistant = forwardRef<VoiceAssistantHandle, { onStateChange?:
         {memoryCleared ? "Memory cleared" : "Clear memory"}
       </button>
 
-      {transcript && <div className="voice-transcript">“{transcript}”</div>}
+      {transcript && <div className="voice-transcript">"{transcript}"</div>}
       {reply && <div className="voice-reply">{reply}</div>}
     </div>
   );
-  },
-);
+});
 
 VoiceAssistant.displayName = "VoiceAssistant";
