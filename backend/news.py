@@ -1,120 +1,66 @@
 """
-news.py — fetches news headlines, structured for both voice replies and the
-frontend dashboard.
-
-Prefers NewsData.io (broader free tier, commercial use allowed) if
-NEWSDATA_KEY is set; falls back to NewsAPI.org (NEWSAPI_KEY) if not.
-Get a free NewsData.io key at https://newsdata.io/register,
-or a NewsAPI.org one at https://newsapi.org/register.
+Headlines. NewsData.io when a key is set, otherwise (or if it fails)
+Google News RSS, which needs no key. So the news never comes back empty.
 """
-
-from __future__ import annotations
-
-import os
-from dataclasses import dataclass
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus
 
 import requests
 
-NEWSDATA_KEY = os.environ.get("NEWSDATA_KEY")
-NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
-
-NEWSDATA_URL = "https://newsdata.io/api/1/latest"
-NEWSAPI_URL = "https://newsapi.org/v2/everything"
+import config
 
 
-@dataclass
-class Article:
-    title: str
-    source: str
+def _newsdata(topic: str | None, limit: int) -> list[dict]:
+    params = {"apikey": config.NEWSDATA_KEY, "country": config.NEWS_COUNTRY, "language": "en"}
+    if topic:
+        params.pop("country")
+        params["q"] = topic
+    r = requests.get("https://newsdata.io/api/1/latest", params=params, timeout=8)
+    data = r.json()
+    if data.get("status") != "success":
+        raise RuntimeError(str(data)[:150])
+    out = []
+    for it in data.get("results", []):
+        if it.get("title"):
+            out.append({"title": it["title"].strip(), "source": it.get("source_name") or it.get("source_id") or ""})
+        if len(out) >= limit:
+            break
+    return out
 
 
-def _fetch_newsdata(query: str, limit: int) -> tuple[list[Article] | None, str]:
-    try:
-        resp = requests.get(
-            NEWSDATA_URL,
-            params={"apikey": NEWSDATA_KEY, "q": query, "language": "en", "size": limit},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        body = ""
-        if getattr(e, "response", None) is not None:
-            body = f" — response: {e.response.text[:200]}"
-        return None, f"NewsData request failed: {e}{body}"
-    except Exception as e:  # catch anything unexpected (bad JSON, etc.) rather than hiding it
-        return None, f"NewsData response error: {type(e).__name__}: {e}"
-
-    results = data.get("results") or []
-    articles = [
-        Article(title=(r.get("title") or "").strip(), source=(r.get("source_id") or ""))
-        for r in results[:limit]
-        if r.get("title")
-    ]
-    return articles, "" if articles else "NewsData returned no usable results"
+def parse_rss(xml_text: str, limit: int) -> list[dict]:
+    out = []
+    root = ET.fromstring(xml_text)
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        if not title:
+            continue
+        source = (item.findtext("source") or "").strip()
+        if " - " in title and not source:
+            title, source = title.rsplit(" - ", 1)
+        elif source and title.endswith(" - " + source):
+            title = title[: -len(source) - 3]
+        out.append({"title": title, "source": source})
+        if len(out) >= limit:
+            break
+    return out
 
 
-def _fetch_newsapi(query: str, limit: int) -> tuple[list[Article] | None, str]:
-    try:
-        resp = requests.get(
-            NEWSAPI_URL,
-            params={
-                "q": query,
-                "language": "en",
-                "sortBy": "publishedAt",
-                "pageSize": limit,
-                "apiKey": NEWSAPI_KEY,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        body = ""
-        if getattr(e, "response", None) is not None:
-            body = f" — response: {e.response.text[:200]}"
-        return None, f"NewsAPI request failed: {e}{body}"
-    except Exception as e:
-        return None, f"NewsAPI response error: {type(e).__name__}: {e}"
-
-    articles = data.get("articles") or []
-    parsed = [
-        Article(
-            title=(a.get("title") or "").split(" - ")[0].strip(),
-            source=(a.get("source") or {}).get("name", ""),
-        )
-        for a in articles[:limit]
-        if a.get("title")
-    ]
-    return parsed, "" if parsed else "NewsAPI returned no usable results"
+def _rss(topic: str | None, limit: int) -> list[dict]:
+    region = f"hl=en-{config.NEWS_COUNTRY.upper()}&gl={config.NEWS_COUNTRY.upper()}&ceid={config.NEWS_COUNTRY.upper()}:en"
+    url = (f"https://news.google.com/rss/search?q={quote_plus(topic)}&{region}" if topic
+           else f"https://news.google.com/rss?{region}")
+    r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    return parse_rss(r.text, limit)
 
 
-def fetch_articles(query: str, limit: int = 5) -> tuple[list[Article], str]:
-    """Returns (articles, note). Note is empty on success, otherwise a
-    real, specific explanation — safe to show directly to the user."""
-    errors = []
-
-    if NEWSDATA_KEY:
-        articles, err = _fetch_newsdata(query, limit)
-        if articles:
-            return articles, ""
-        errors.append(err)
-
-    if NEWSAPI_KEY:
-        articles, err = _fetch_newsapi(query, limit)
-        if articles:
-            return articles, ""
-        errors.append(err)
-
-    if not NEWSDATA_KEY and not NEWSAPI_KEY:
-        return [], "No news API key configured — add NEWSDATA_KEY or NEWSAPI_KEY to backend/.env."
-    return [], " | ".join(e for e in errors if e) or "Couldn't fetch news right now — try again shortly."
-
-
-def fetch_world_news(limit: int = 5) -> str:
-    """Formatted string for voice replies / WhatsApp text."""
-    articles, note = fetch_articles("world", limit)
-    if note:
-        return note
-    lines = [f"- {a.title}" + (f" ({a.source})" if a.source else "") for a in articles]
-    return "Here's what's happening around the world:\n" + "\n".join(lines)
+def headlines(topic: str | None = None, limit: int = 5) -> list[dict]:
+    if config.NEWSDATA_KEY:
+        try:
+            items = _newsdata(topic, limit)
+            if items:
+                return items
+        except Exception:
+            pass
+    return _rss(topic, limit)

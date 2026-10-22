@@ -1,73 +1,37 @@
-"""
-gmail_client.py — OAuth2 Gmail read access.
+"""Read-only Gmail. Run `python gmail_auth.py` once to sign in."""
+from pathlib import Path
 
-This is different from every other integration in this project: Gmail is
-your private inbox, not public data, so Google requires an actual login +
-consent flow (OAuth2), not just an API key. It's a one-time setup, done
-once by hand, not something that happens automatically.
-
-Setup (do this once, manually):
-
-1. console.cloud.google.com — reuse the same project you made for YouTube,
-   or create a new one.
-2. APIs & Services -> Library -> search "Gmail API" -> Enable.
-3. APIs & Services -> OAuth consent screen -> User Type: External ->
-   fill in an app name (e.g. "Nemiii") and your own email as the support/
-   developer contact -> Save. On the "Test users" step, add your own
-   Google account email as a test user (required while the app is
-   unpublished, which is fine for personal use).
-4. APIs & Services -> Credentials -> Create Credentials -> OAuth client ID
-   -> Application type: "Desktop app" -> Create. Download the JSON.
-5. Save that downloaded file as backend/credentials.json.
-   NEVER commit this file — it's in .gitignore already, double check.
-6. Run once: python gmail_auth.py
-   Opens a browser, you log in and grant read-only access. Saves
-   backend/token.json (also gitignored) — the backend reuses this
-   automatically after that, refreshing it as needed. You do NOT need to
-   log in again unless you revoke access or delete token.json.
-
-Scope used is read-only (gmail.readonly) — this can never send, delete,
-or modify anything in your mailbox, only read it.
-"""
-
-from __future__ import annotations
-
-import os
-
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
+BASE = Path(__file__).resolve().parent
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-CREDENTIALS_PATH = os.environ.get("GMAIL_CREDENTIALS_PATH", "credentials.json")
-TOKEN_PATH = os.environ.get("GMAIL_TOKEN_PATH", "token.json")
 
 
-def get_credentials():
-    """Returns valid credentials, refreshing an expired token if needed.
-    Returns None if never authorized — caller should say so, not crash."""
-    if not os.path.exists(TOKEN_PATH):
-        return None
+def _credentials():
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
-    creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-
-    if creds and creds.valid:
-        return creds
-
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-        except Exception:
-            return None
-        with open(TOKEN_PATH, "w") as f:
-            f.write(creds.to_json())
-        return creds
-
-    return None
+    token = BASE / "token.json"
+    if not token.exists():
+        raise RuntimeError("Gmail isn't signed in yet. Run: python gmail_auth.py")
+    creds = Credentials.from_authorized_user_file(str(token), SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        token.write_text(creds.to_json())
+    if not creds.valid:
+        raise RuntimeError("Gmail sign-in expired. Run: python gmail_auth.py")
+    return creds
 
 
-def get_service():
-    creds = get_credentials()
-    if not creds:
-        return None
-    return build("gmail", "v1", credentials=creds)
+def unread(limit: int = 5) -> tuple[int, list[dict]]:
+    from googleapiclient.discovery import build
+
+    svc = build("gmail", "v1", credentials=_credentials(), cache_discovery=False)
+    res = svc.users().messages().list(userId="me", q="is:unread in:inbox", maxResults=limit).execute()
+    total = res.get("resultSizeEstimate", 0)
+    out = []
+    for m in res.get("messages", []):
+        msg = svc.users().messages().get(userId="me", id=m["id"], format="metadata",
+                                         metadataHeaders=["From", "Subject"]).execute()
+        h = {x["name"]: x["value"] for x in msg["payload"]["headers"]}
+        sender = h.get("From", "someone").split("<")[0].strip().strip('"') or "someone"
+        out.append({"from": sender, "subject": h.get("Subject", "(no subject)")})
+    return total, out
