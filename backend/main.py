@@ -1,210 +1,194 @@
 """
-main.py — Nemiii backend (v1, simple)
+Nemiii backend (FastAPI).
 
-Run inside WSL:
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-The Next.js frontend (running on Windows, browser does STT/TTS) sends the
-recognized text here. This service asks an LLM to decide between a plain
-reply and one whitelisted action, executes it via pc_control.py (which
-shells out to powershell.exe on the Windows host, or runs WSL-side dev
-tooling) or info_actions.py (which just answers with information — no
-side effects, nothing opens), and returns a reply string the frontend
-speaks aloud.
+  POST /chat            talk to her (can run actions, chain up to 3)
+  POST /gesture_action  hand-gesture shortcuts (no AI involved)
+  POST /vision          "what do you see" for a camera / screen picture
+  GET  /dashboard       weather + place + headlines for the side panel
+  GET  /health          what is configured and working
+  POST /reset_memory    clear the conversation (add {"all": true} to wipe saved facts too)
 """
-
-import json
-import os
-
-from dotenv import load_dotenv
-
-load_dotenv()  # must happen before importing pc_control/news/info_actions —
-                # they read their env vars (NEWSDATA_KEY, WHATSAPP_DEFAULT_NUMBER,
-                # GITHUB_USERNAME, etc.) at import time, so this has to come first.
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from groq import Groq
 from pydantic import BaseModel
 
-import pc_control
+import actions
+import config  # loads .env first
+import geo
+import llm
+import memory
 import news
-import info_actions
+import persona
+from actions import winshell
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")  # check console.groq.com/docs/models for current options
+VERSION = "13"
+MAX_STEPS = 3
 
-app = FastAPI(title="Nemiii Backend")
-
+app = FastAPI(title="Nemiii", version=VERSION)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this once you're past local dev
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.\d+\.\d+\.\d+)(:\d+)?",
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-SYSTEM_PROMPT = """You are Nemiii, a concise voice assistant that can optionally control the user's Windows PC.
-
-Respond with ONLY a JSON object, no markdown fences, no extra text, matching this shape:
-{"reply": "<what to say back, kept short and natural for speech>", "action": null}
-
-If the user's request maps to one of these actions, fill "action" instead of null:
-{"type": "open_app", "arg": "<the app name, e.g. notepad, chrome, spotify, steam, pubg, discord, obs — any installed app name works, not just common ones>"}
-{"type": "close_app", "arg": "<same as open_app — the app/process name to close>"}
-{"type": "open_url", "arg": "<a full http/https URL>"}
-{"type": "open_folder", "arg": "<one of: documents, downloads, desktop, pictures>"}
-{"type": "search_web", "arg": "<the search query text>"}
-{"type": "screenshot", "arg": ""}
-{"type": "set_volume", "arg": "<up|down|mute>"}
-{"type": "media_control", "arg": "<play_pause|next|previous|stop>"}
-{"type": "lock", "arg": ""}
-{"type": "type_text", "arg": "<literal text to type into whatever window currently has focus>"}
-{"type": "open_and_type", "arg": "<app_name::text to type — use this instead of type_text when the target app isn't already open/focused>"}
-{"type": "send_whatsapp_news", "arg": "<phone number in +countrycode format, or empty string to use the default configured number>"}
-{"type": "play_youtube", "arg": "<song or video name to play>"}
-{"type": "minimize_all", "arg": ""}
-{"type": "set_brightness", "arg": "<up|down|or a number 0-100>"}
-{"type": "switch_tab", "arg": "<next|previous>"}
-{"type": "copy_selection", "arg": ""}
-{"type": "paste_clipboard", "arg": ""}
-{"type": "tell_news", "arg": "<optional topic, e.g. 'technology' or 'cricket' — empty for world news. Speaks headlines directly, does not open anything.>"}
-{"type": "look_up", "arg": "<any topic to look up on Wikipedia — general knowledge questions>"}
-{"type": "convert_currency", "arg": "<amount and two 3-letter currency codes, e.g. '100 USD to INR'>"}
-{"type": "check_github", "arg": "<GitHub username, or empty to use the configured default>"}
-{"type": "project_status", "arg": "<project name from the configured list — speaks git status, doesn't open anything>"}
-{"type": "open_project", "arg": "<project name from the configured list — opens it in VS Code>"}
-{"type": "open_github_repo", "arg": "<repo name — opens it in the browser>"}
-{"type": "check_email", "arg": "<optional Gmail search query like 'is:unread' or 'from:someone' — empty for most recent emails>"}
-
-If nothing matches, or the user just wants conversation, set "action" to null and just reply.
-Never invent action types or folder names outside the folder list above — but app names for
-open_app/close_app can be anything the user names; the PC-side code resolves them against
-what's actually installed."""
-
-
-class ChatRequest(BaseModel):
+class ChatIn(BaseModel):
     message: str
+    lat: float | None = None
+    lon: float | None = None
 
 
-class ChatResponse(BaseModel):
-    reply: str
-    action_taken: str | None = None
-    action_result: str | None = None
+class GestureIn(BaseModel):
+    name: str
 
 
-# Simple in-memory conversation history. This is a single-user local app,
-# so one global list is fine — no need for session IDs. Capped so the
-# context doesn't grow unbounded (and so older turns don't keep costing
-# tokens on every single call forever).
-MAX_HISTORY_MESSAGES = 20  # ~10 back-and-forth turns
-conversation_history: list[dict[str, str]] = []
+class VisionIn(BaseModel):
+    image: str
+    question: str = ""
+
+
+class ResetIn(BaseModel):
+    all: bool = False
+
+
+GESTURES = {
+    "swipe_left": ("switch_tab", {"direction": "previous"}),
+    "swipe_right": ("switch_tab", {"direction": "next"}),
+    "fist": ("minimize_all", {}),
+    "two_fingers": ("copy_selection", {}),
+    "three_fingers": ("paste_clipboard", {}),
+}
+
+
+def _run_actions(parsed_actions: list[dict]) -> list[dict]:
+    results = []
+    for a in parsed_actions:
+        res = actions.run(a["name"], a["args"])
+        results.append({"name": a["name"], "kind": actions.kind_of(a["name"]) or "pc",
+                        "ok": res.ok, "message": res.message})
+    return results
+
+
+def converse(user_text: str) -> dict:
+    system = persona.build_system_prompt(actions.help_text())
+    messages = [{"role": "system", "content": system}] + memory.get_history() + [
+        {"role": "user", "content": user_text}]
+    provider = "none"
+    all_results: list[dict] = []
+    reply = ""
+
+    for step in range(MAX_STEPS):
+        text, provider = llm.chat(messages, json_mode=True)
+        parsed = llm.parse_reply(text)
+        reply = parsed["reply"] or reply
+        if not parsed["actions"]:
+            break
+        results = _run_actions(parsed["actions"])
+        all_results += results
+        info = [r for r in results if r["kind"] == "info"]
+        if info and step < MAX_STEPS - 1:
+            # Give the real data back to the model so she speaks facts, not guesses.
+            data = "\n".join(f"[{r['name']}] {'OK' if r['ok'] else 'FAILED'}: {r['message']}" for r in info)
+            messages.append({"role": "assistant", "content": text})
+            messages.append({"role": "user", "content": (
+                "ACTION RESULTS (real data):\n" + data +
+                "\nNow answer in your own words, using ONLY these results. Keep it short and spoken. "
+                'Reply as JSON: {"reply": "...", "actions": []}')})
+            continue
+        break
+
+    # Be honest when something failed.
+    failed = [r for r in all_results if not r["ok"]]
+    if failed:
+        reply = "I couldn't do that. " + failed[0]["message"]
+    elif not reply and all_results:
+        reply = all_results[-1]["message"]
+    return {"reply": reply or "Sorry, I didn't catch that.", "actions": all_results, "provider": provider}
+
+
+@app.post("/chat")
+def chat(body: ChatIn):
+    text = body.message.strip()
+    if not text:
+        return {"reply": "", "actions": [], "provider": "none"}
+    if body.lat is not None and body.lon is not None:
+        geo.save_location(geo.last_location().get("name", "Your location"), body.lat, body.lon)
+    try:
+        out = converse(text)
+    except RuntimeError as e:
+        return {"reply": "I can't reach my language model right now.", "actions": [], "provider": "none",
+                "error": str(e)}
+    memory.add_message("user", text)
+    memory.add_message("assistant", out["reply"])
+    return out
+
+
+@app.post("/gesture_action")
+def gesture_action(body: GestureIn):
+    spec = GESTURES.get(body.name)
+    if not spec:
+        return {"ok": False, "message": "unknown gesture"}
+    res = actions.run(*spec)
+    return {"ok": res.ok, "message": res.message}
+
+
+@app.post("/vision")
+def vision(body: VisionIn):
+    try:
+        text, provider = llm.describe_image(body.image, body.question or
+                                            "Describe what you see in two short spoken sentences.")
+    except RuntimeError as e:
+        return {"reply": "I can't look at that right now.", "provider": "none", "error": str(e)}
+    memory.add_message("user", f"[showed me a picture] {body.question}".strip())
+    memory.add_message("assistant", text)
+    return {"reply": text, "provider": provider}
+
+
+@app.get("/dashboard")
+def dashboard(lat: float | None = None, lon: float | None = None):
+    loc = geo.last_location()
+    if lat is not None and lon is not None:
+        loc = {"name": geo.reverse_geocode(lat, lon), "lat": lat, "lon": lon}
+        geo.save_location(loc["name"], lat, lon)
+    out = {"place": loc["name"], "weather": None, "news": [], "errors": []}
+    try:
+        out["weather"] = geo.get_weather(loc["lat"], loc["lon"])
+    except Exception as e:
+        out["errors"].append("weather: " + str(e)[:80])
+    try:
+        out["news"] = news.headlines(None, 4)
+    except Exception as e:
+        out["errors"].append("news: " + str(e)[:80])
+    return out
 
 
 @app.get("/health")
 def health():
-    """
-    Reports what's actually configured, not just whether the server is up.
-    Point of this: every integration failure we've hit so far (empty .env,
-    stale process still running with an old environment, wrong working
-    directory when uvicorn started) would have been immediately obvious
-    from this endpoint instead of several rounds of guessing.
-    """
+    local = llm.local_status(force=True)
+    base = Path(__file__).resolve().parent
     return {
-        "ok": True,
-        "llm_configured": client is not None,
-        "news_configured": bool(news.NEWSDATA_KEY or news.NEWSAPI_KEY),
-        "news_provider": "newsdata" if news.NEWSDATA_KEY else ("newsapi" if news.NEWSAPI_KEY else None),
-        "youtube_configured": bool(pc_control.YOUTUBE_API_KEY),
-        "whatsapp_configured": bool(pc_control.WHATSAPP_DEFAULT_NUMBER),
-        "github_username_configured": bool(pc_control.GITHUB_USERNAME),
-        "projects_configured": list(pc_control.PROJECT_WHITELIST.keys()),
-        "conversation_history_length": len(conversation_history),
+        "ok": True, "version": VERSION,
+        "llm_provider_setting": config.LLM_PROVIDER,
+        "local": {"url": local["url"], "model": config.LOCAL_MODEL, "ready": llm.local_ready(),
+                  "installed_models": local["models"]},
+        "groq_configured": bool(config.GROQ_API_KEY),
+        "news_provider": "newsdata+rss" if config.NEWSDATA_KEY else "rss",
+        "youtube_configured": bool(config.YOUTUBE_API_KEY),
+        "github_configured": bool(config.GITHUB_USERNAME),
+        "gmail_signed_in": (base / "token.json").exists(),
+        "pc_control_available": winshell.available(),
+        "saved_facts": len(memory.get_facts()),
+        "user_name": config.USER_NAME,
+        "actions": sorted(actions.REGISTRY),
     }
 
 
 @app.post("/reset_memory")
-def reset_memory():
-    conversation_history.clear()
+def reset_memory(body: ResetIn | None = None):
+    if body and body.all:
+        memory.clear_all()
+    else:
+        memory.clear_history()
     return {"ok": True}
-
-
-@app.get("/local_news")
-def local_news(query: str = "world"):
-    articles, note = news.fetch_articles(query, limit=5)
-    return {
-        "articles": [{"title": a.title, "source": a.source} for a in articles],
-        "note": note,
-    }
-
-
-class GestureActionRequest(BaseModel):
-    type: str
-    arg: str = ""
-
-
-@app.post("/gesture_action")
-def gesture_action(req: GestureActionRequest):
-    """
-    Direct action execution, no LLM involved — for hand gestures, where a
-    round-trip through Groq would make the response feel laggy. Only the
-    same whitelisted pc_control actions are reachable here, nothing new.
-    """
-    result = pc_control.execute(req.type, req.arg)
-    return {"ok": result.ok, "message": result.message}
-
-
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    if client is None:
-        return ChatResponse(reply="Backend has no GROQ_API_KEY set yet — add one to backend/.env")
-
-    conversation_history.append({"role": "user", "content": req.message})
-
-    completion = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}, *conversation_history],
-        temperature=0.4,
-        response_format={"type": "json_object"},
-    )
-
-    raw = completion.choices[0].message.content
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return ChatResponse(reply="I got confused parsing that one — try again?")
-
-    reply = parsed.get("reply", "")
-    action = parsed.get("action")
-
-    action_type = None
-    action_result_text = None
-
-    if action:
-        action_type = action.get("type", "")
-        arg = action.get("arg", "")
-
-        if action_type in info_actions.INFO_ACTIONS:
-            # These just answer with information — nothing opens, no
-            # PowerShell involved. The answer itself becomes what's spoken.
-            reply = info_actions.INFO_ACTIONS[action_type](arg)
-        else:
-            result = pc_control.execute(action_type, arg)
-            if result.ok:
-                action_result_text = result.message
-            else:
-                # The LLM wrote `reply` before anything actually ran, so it
-                # has no way to know the action failed — without this, the
-                # frontend would confidently speak success even when
-                # nothing happened.
-                action_result_text = f"failed: {result.message}"
-                reply = f"{reply} Actually, that didn't work — {result.message}"
-
-    # Store only the plain (and now honest, if corrected) reply text in
-    # history, not the raw JSON envelope — keeps future context readable
-    # and avoids the model imitating its own JSON wrapper mid-conversation.
-    conversation_history.append({"role": "assistant", "content": reply})
-    del conversation_history[:-MAX_HISTORY_MESSAGES]
-
-    return ChatResponse(reply=reply, action_taken=action_type, action_result=action_result_text)

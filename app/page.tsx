@@ -1,5 +1,5 @@
-import NemiiiOrb from "@/components/NemiiiOrb";
+import Nemiii from "@/components/Nemiii";
 
-export default function Home() {
-  return <NemiiiOrb />;
+export default function Page() {
+  return <Nemiii />;
 }
