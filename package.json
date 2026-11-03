@@ -1,13 +1,14 @@
 {
   "name": "nemiii",
-  "version": "14.0.0",
+  "version": "15.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev --webpack -p 3000",
     "build": "next build --webpack",
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit",
-    "postinstall": "node scripts/copy-mediapipe.mjs"
+    "postinstall": "node scripts/copy-mediapipe.mjs",
+    "test:speech": "node scripts/test-speech-text.cjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",

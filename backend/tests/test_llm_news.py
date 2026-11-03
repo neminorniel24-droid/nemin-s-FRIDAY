@@ -22,10 +22,10 @@ def test_parse_code_fence_and_plain_text():
     assert llm.parse_reply("just talking")["reply"] == "just talking"
 
 
-def test_max_three_actions():
-    many = [{"name": "a", "args": {}}] * 6
+def test_max_six_actions():
+    many = [{"name": "a", "args": {}}] * 9
     import json
-    assert len(llm.parse_reply(json.dumps({"reply": "x", "actions": many}))["actions"]) == 3
+    assert len(llm.parse_reply(json.dumps({"reply": "x", "actions": many}))["actions"]) == 6
 
 
 def test_has_model_matching():
@@ -45,3 +45,23 @@ def test_news_falls_back_to_rss(monkeypatch):
     monkeypatch.setattr(news, "_newsdata", lambda *a: (_ for _ in ()).throw(RuntimeError("401")))
     monkeypatch.setattr(news, "_rss", lambda t, n: [{"title": "From RSS", "source": "x"}])
     assert news.headlines()[0]["title"] == "From RSS"
+
+
+def test_vision_falls_back_when_model_is_retired(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(config, "GROQ_VISION_MODEL", "meta-llama/retired")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "groq")
+    tried = []
+
+    class FakeCompletions:
+        def create(self, model, **kw):
+            tried.append(model)
+            if model == "meta-llama/retired":
+                raise Exception("Error code: 404 - model_not_found")
+            msg = type("M", (), {"content": "a red cup"})()
+            return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+    fake = type("G", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})()})()
+    monkeypatch.setattr(llm, "_groq", lambda: fake)
+    text, provider = llm.describe_image("data:image/jpeg;base64,AAAA", "what is this")
+    assert text == "a red cup" and provider == "groq" and tried == ["meta-llama/retired", "qwen/qwen3.8-27b"]

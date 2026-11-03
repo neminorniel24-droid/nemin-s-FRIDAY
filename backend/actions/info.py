@@ -17,7 +17,7 @@ import memory
 import news
 from . import Result, action
 
-UA = {"User-Agent": "Nemiii/13 (personal assistant)"}
+UA = {"User-Agent": "Nemiii/15 (personal assistant)"}
 
 
 @action("tell_news", "info", 'Get today\'s real headlines. args: {"topic": "optional, e.g. cricket or technology"}')

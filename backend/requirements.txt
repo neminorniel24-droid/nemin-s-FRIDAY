@@ -7,3 +7,6 @@ google-api-python-client
 google-auth-oauthlib
 pytest
 httpx
+
+pypdf
+huggingface_hub

@@ -35,3 +35,16 @@ def run_ps(script: str, timeout: int = 25) -> tuple[bool, str]:
 def ps_quote(s: str) -> str:
     """Make a Python string safe inside a PowerShell single-quoted string."""
     return "'" + str(s).replace("'", "''") + "'"
+
+
+def toast(title: str, text: str) -> None:
+    """A Windows notification balloon. Used when a reminder fires and the page is closed."""
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing\n"
+        "$n = New-Object System.Windows.Forms.NotifyIcon\n"
+        "$n.Icon = [System.Drawing.SystemIcons]::Information\n"
+        "$n.Visible = $true\n"
+        f"$n.ShowBalloonTip(10000, {ps_quote(title)}, {ps_quote(text)}, [System.Windows.Forms.ToolTipIcon]::Info)\n"
+        "Start-Sleep -Seconds 11\n$n.Dispose()"
+    )
+    run_ps(script, timeout=30)

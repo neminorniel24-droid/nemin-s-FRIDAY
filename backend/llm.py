@@ -105,25 +105,50 @@ GROQ_BACKUP_MODELS = ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]
 
 
 def _groq_chat(messages: list[dict], json_mode: bool) -> str:
-    """Strict JSON mode first; if Groq could not parse the output, retry plainly, then backup models."""
+    """Strict JSON mode first; if Groq says it could not parse the output, retry plainly
+    (parse_reply copes with plain text) and then try backup models."""
     models = [config.GROQ_MODEL] + [m for m in GROQ_BACKUP_MODELS if m != config.GROQ_MODEL]
-    last = None
+    last: Exception | None = None
     for model in models:
         for strict in ([True, False] if json_mode else [False]):
             kwargs = {"model": model, "messages": messages, "temperature": 0.5}
             if strict:
                 kwargs["response_format"] = {"type": "json_object"}
             if model.startswith("openai/gpt-oss"):
-                kwargs["reasoning_effort"] = "low"
+                kwargs["reasoning_effort"] = "low"  # faster answers, far fewer broken outputs
             try:
                 resp = _groq().chat.completions.create(**kwargs)
                 return resp.choices[0].message.content or ""
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 last = e
                 msg = str(e).lower()
                 if "401" in msg or "invalid api key" in msg:
                     raise
     raise last or RuntimeError("groq failed")
+
+
+GROQ_VISION_BACKUPS = ["qwen/qwen3.8-27b"]  # Groq retires vision models now and then; these are tried next
+
+
+def _groq_vision(image_data_url: str, question: str):
+    """Try your configured vision model, then the backups. Old .env files may still name a retired model."""
+    models = [config.GROQ_VISION_MODEL] + [m for m in GROQ_VISION_BACKUPS if m != config.GROQ_VISION_MODEL]
+    last: Exception | None = None
+    for model in models:
+        try:
+            return _groq().chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ]}],
+                temperature=0.4,
+            )
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if "401" in str(e) or "invalid api key" in str(e).lower():
+                raise
+    raise last or RuntimeError("groq vision failed")
 
 
 # ------------------------------------------------------------------ public API
@@ -169,14 +194,7 @@ def describe_image(image_data_url: str, question: str) -> tuple[str, str]:
             if not config.GROQ_API_KEY:
                 errors.append("GROQ_API_KEY is not set")
                 continue
-            resp = _groq().chat.completions.create(
-                model=config.GROQ_VISION_MODEL,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": question},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                ]}],
-                temperature=0.4,
-            )
+            resp = _groq_vision(image_data_url, question)
             return resp.choices[0].message.content or "", "groq"
         except Exception as e:
             errors.append(f"{provider}: {str(e)[:200]}")
@@ -209,7 +227,7 @@ def parse_reply(text: str) -> dict:
     if raw is None and data.get("action"):
         raw = [data["action"]]
     actions = []
-    for a in (raw or [])[:3]:
+    for a in (raw or [])[:6]:
         if isinstance(a, str):
             a = {"name": a, "args": {}}
         if isinstance(a, dict) and a.get("name"):

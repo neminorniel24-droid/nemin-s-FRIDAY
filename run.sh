@@ -23,6 +23,7 @@ for p in 3000 3001 3002 3003; do
 done
 [ -z "$FRONT" ] && { echo "No free port between 3000 and 3003."; exit 1; }
 URL="http://localhost:$FRONT"
+echo "$FRONT" > .run/port
 
 # ---- backend (only listens on this computer; it can control your PC, so it is never exposed to the network) ----
 if [ ! -x backend/.venv/bin/python ]; then echo "Not installed yet. Run:  bash scripts/install.sh"; exit 1; fi

@@ -92,7 +92,8 @@ def open_app(a: dict) -> Result:
     return Result(True, f"Opening {out.replace('OK:', '').strip() or name}.")
 
 
-@action("close_app", "pc", 'Close a running program politely. args: {"name": "chrome"}')
+@action("close_app", "pc", 'Close a running program politely. args: {"name": "chrome"}',
+        risky=True, describe=lambda a: f"close {_clean(a.get('name')) or 'that program'}")
 def close_app(a: dict) -> Result:
     name = _clean(a.get("name"))
     key = name.lower().replace(" ", "")
@@ -220,7 +221,7 @@ def screenshot(a: dict) -> Result:
     return Result(True, "Screenshot saved in your Pictures folder.") if ok else Result(False, out)
 
 
-@action("lock_pc", "pc", "Lock the computer. args: {}")
+@action("lock_pc", "pc", "Lock the computer. args: {}", risky=True, describe=lambda a: "lock your PC")
 def lock_pc(a: dict) -> Result:
     return _ps("rundll32.exe user32.dll,LockWorkStation", "Locking your PC.")
 
@@ -257,7 +258,8 @@ def _type_script(text: str, switch_window: bool) -> str:
     return f"$w = New-Object -ComObject WScript.Shell\nSet-Clipboard -Value {ps_quote(text)}\n{pre}$w.SendKeys('^v')"
 
 
-@action("type_text", "pc", 'Type text into the window you were just using. args: {"text": "..."}')
+@action("type_text", "pc", 'Type text into the window you were just using. args: {"text": "..."}',
+        risky=True, describe=lambda a: f"type \"{str(a.get('text', ''))[:40]}\" into your last window")
 def type_text(a: dict) -> Result:
     text = str(a.get("text", ""))
     if not text:
@@ -265,7 +267,8 @@ def type_text(a: dict) -> Result:
     return _ps(_type_script(text[:2000], switch_window=True), "Typed it.")
 
 
-@action("open_and_type", "pc", 'Open an app, then type text in it. args: {"app": "notepad", "text": "..."}')
+@action("open_and_type", "pc", 'Open an app, then type text in it. args: {"app": "notepad", "text": "..."}',
+        risky=True, describe=lambda a: f"open {_clean(a.get('app'))} and type into it")
 def open_and_type(a: dict) -> Result:
     opened = open_app({"name": a.get("app")})
     if not opened.ok:

@@ -61,7 +61,7 @@ cur = open("backend/.env").read()
 have = set(re.findall(r"^([A-Z_]+)=", cur, re.M))
 add = [l for l in ex if re.match(r"^[A-Z_]+=", l) and l.split("=", 1)[0] not in have]
 if add:
-    open("backend/.env", "a").write("\n# ---- added by the v13 installer ----\n" + "\n".join(add) + "\n")
+    open("backend/.env", "a").write("\n# ---- added by the v15 installer ----\n" + "\n".join(add) + "\n")
     print("added new settings:", ", ".join(l.split("=")[0] for l in add))
 PY
 for f in credentials.json token.json; do

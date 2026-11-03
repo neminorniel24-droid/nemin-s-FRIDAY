@@ -17,9 +17,12 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import type { AvatarState } from "@/lib/types";
+import { THEMES, type Theme } from "@/lib/themes";
 
 export interface OrbSceneApi {
   setState(s: AvatarState): void;
+  /** Give the orb a function that returns how loud your voice is (0 to 1), so it pulses with you. */
+  setLevelSource(fn: (() => number) | null): void;
   rotateBy(deltaTheta: number, deltaPhi: number): void;
   zoomBy(factor: number): void;
   zoomIn(): void;
@@ -48,12 +51,6 @@ const STATE_LOOK: Record<AvatarState, { spin: number; bloom: number; talk: numbe
   thinking: { spin: 4, bloom: 0.25, talk: 0, breathe: 0 },
   speaking: { spin: 1.8, bloom: 0.35, talk: 1, breathe: 0 },
 };
-
-const C_BRIGHT = 0x14e0c0;
-const C_MID = 0x0d9488;
-const C_DIM = 0x0f5e56;
-const C_FAINT = 0x0a3a35;
-const C_HOT = 0x7dfff0;
 
 const CODE = [
   "sys.init()", "0xFF3A", "malloc()", ">> SCAN", "void*", "ACK",
@@ -121,7 +118,8 @@ const meridianPts = (radius: number, lon: number, segs = 120) => {
   return pts;
 };
 
-export function createOrbScene(container: HTMLElement): OrbSceneApi {
+export function createOrbScene(container: HTMLElement, theme: Theme = THEMES.peacock): OrbSceneApi {
+  const { bright: C_BRIGHT, mid: C_MID, dim: C_DIM, faint: C_FAINT, hot: C_HOT } = theme.orb;
   let width = container.clientWidth || 1;
   let height = container.clientHeight || 1;
 
@@ -146,12 +144,15 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   composer.addPass(bloom);
 
   const chromaticPass = new ShaderPass({
-    uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uIntensity: { value: 0.003 } },
+    uniforms: {
+      tDiffuse: { value: null }, uTime: { value: 0 }, uIntensity: { value: 0.003 },
+      uTint: { value: new THREE.Vector3(...theme.fringe.tint) }, uBlue: { value: theme.fringe.blue },
+    },
     vertexShader: `
       varying vec2 vUv;
       void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: `
-      uniform sampler2D tDiffuse; uniform float uTime; uniform float uIntensity; varying vec2 vUv;
+      uniform sampler2D tDiffuse; uniform float uTime; uniform float uIntensity; uniform vec3 uTint; uniform float uBlue; varying vec2 vUv;
       void main() {
         vec2 dir = vUv - vec2(0.5);
         float offset = uIntensity * length(dir);
@@ -159,8 +160,8 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
         vec4 cr = texture2D(tDiffuse, vUv + dir * offset);
         vec4 cg = texture2D(tDiffuse, vUv);
         vec4 cb = texture2D(tDiffuse, vUv - dir * offset * 0.5);
-        gl_FragColor = vec4(cr.r, cg.g * 1.05, cb.b * 0.6, 1.0) * flicker;
-        gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(1.15, 0.85, 0.55), 0.3);
+        gl_FragColor = vec4(cr.r, cg.g * 1.05, cb.b * uBlue, 1.0) * flicker;
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * uTint, 0.3);
       }`,
   });
   composer.addPass(chromaticPass);
@@ -550,6 +551,8 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   // ═══ STATE ═══
   let look = STATE_LOOK.idle;
   let spinMul = 1, bloomAdd = 0, talkAmt = 0, breatheAmt = 0;
+  let levelFn: (() => number) | null = null;
+  let level = 0; // how loud your voice is right now
 
   // ═══ ANIMATION ═══
   let last = performance.now();
@@ -560,14 +563,14 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   let disposed = false;
 
   // quality watchdog
-  let slowFor = 0, level = 0;
+  let slowFor = 0, quality = 0;
   const lowerQuality = () => {
-    level++;
-    if (level === 1) pixelRatio = Math.min(pixelRatio, 1);
-    else if (level === 2) {
+    quality++;
+    if (quality === 1) pixelRatio = Math.min(pixelRatio, 1);
+    else if (quality === 2) {
       pixelRatio = Math.min(pixelRatio, 0.8);
       chromaticPass.enabled = false;
-    } else if (level === 3) {
+    } else if (quality === 3) {
       bloom.enabled = false;
     } else return;
     applySize();
@@ -598,7 +601,11 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     bloomAdd += (look.bloom - bloomAdd) * k;
     talkAmt += (look.talk - talkAmt) * k;
     breatheAmt += (look.breathe - breatheAmt) * k;
-    const sm = spinMul * f;
+    if (levelFn) {
+      const raw = levelFn();
+      level += (raw - level) * Math.min(1, dt * 14);
+    } else level += (0 - level) * Math.min(1, dt * 4);
+    const sm = (spinMul + level * 1.5) * f;
 
     outerShell.rotation.y += 0.0015 * sm;
     outerShell.rotation.x = Math.sin(t * 0.08) * 0.05;
@@ -617,10 +624,10 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     const wave3 = Math.pow(Math.max(0, Math.sin(t * 0.4)), 5);
     const wave4 = Math.pow(Math.max(0, Math.sin(t * 0.7 + 2)), 8);
     const fadeOut = Math.pow(Math.max(0, Math.sin(t * 0.25)), 3);
-    const talk = talkAmt * (0.5 + 0.5 * Math.sin(t * 5.5) * Math.sin(t * 2.03 + 1.3));
+    const talk = Math.max(talkAmt * (0.5 + 0.5 * Math.sin(t * 5.5) * Math.sin(t * 2.03 + 1.3)), level);
     const breathe = breatheAmt * (0.5 + 0.5 * Math.sin(t * 2.2));
     const surge = wave3 * 1.5 + wave4 * 2.0 + talk * 1.1 + breathe * 0.5;
-    const fade = fadeOut * (1 - Math.min(1, talkAmt + breatheAmt));
+    const fade = fadeOut * (1 - Math.min(1, talkAmt + breatheAmt + level * 2));
     coreSphere.scale.setScalar(1 + surge + Math.sin(t * 5) * 0.05);
     coreSphereMat.opacity = Math.min(0.6, Math.max(0, (0.08 + wave1 * 0.05 + surge * 0.2) * (1 - fade * 0.95)));
     glowSphere.scale.setScalar(1 + surge * 0.8);
@@ -706,6 +713,9 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   return {
     setState: (s) => {
       look = STATE_LOOK[s];
+    },
+    setLevelSource: (fn) => {
+      levelFn = fn;
     },
     rotateBy,
     zoomBy,
